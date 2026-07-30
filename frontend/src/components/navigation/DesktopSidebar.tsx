@@ -11,6 +11,7 @@ interface DesktopSidebarProps {
   youtubeLabel: string;
   spotifyConnected?: boolean;
   modelInstalled?: boolean;
+  writerLabel?: string;
   onToggle: () => void;
   onNavigate: (page: Page) => void;
 }
@@ -23,7 +24,7 @@ export function DesktopSidebar(props: DesktopSidebarProps) {
   return <ReactBitsDesktopSidebar {...props} />;
 }
 
-function ReactBitsDesktopSidebar({ activePage, collapsed, youtubeReady, youtubeLabel, spotifyConnected, modelInstalled, onToggle, onNavigate }: DesktopSidebarProps) {
+function ReactBitsDesktopSidebar({ activePage, collapsed, youtubeReady, youtubeLabel, spotifyConnected, modelInstalled, writerLabel, onToggle, onNavigate }: DesktopSidebarProps) {
   return (
     <aside className={`fixed inset-y-0 left-0 z-30 hidden flex-col border-r border-line bg-backgroundElevated/95 shadow-[18px_0_70px_rgba(0,0,0,0.28)] backdrop-blur-xl transition-[width,padding] duration-300 lg:flex ${collapsed ? "w-[5.5rem] px-2 py-4" : "w-60 p-5"}`}>
       <div className={`flex items-center ${collapsed ? "flex-col gap-3" : "gap-3"}`}>
@@ -59,7 +60,7 @@ function ReactBitsDesktopSidebar({ activePage, collapsed, youtubeReady, youtubeL
         })}
       </nav>
 
-      {!collapsed ? <LocalStatusPanel youtubeReady={youtubeReady} youtubeLabel={youtubeLabel} spotifyConnected={spotifyConnected} modelInstalled={modelInstalled} /> : null}
+      {!collapsed ? <LocalStatusPanel youtubeReady={youtubeReady} youtubeLabel={youtubeLabel} spotifyConnected={spotifyConnected} modelInstalled={modelInstalled} writerLabel={writerLabel} /> : null}
     </aside>
   );
 }
@@ -83,18 +84,20 @@ function LocalStatusPanel({
   youtubeLabel,
   spotifyConnected,
   modelInstalled,
+  writerLabel,
 }: {
   youtubeReady: boolean;
   youtubeLabel: string;
   spotifyConnected?: boolean;
   modelInstalled?: boolean;
+  writerLabel?: string;
 }) {
   return (
     <div className="mt-6 space-y-2 border-t border-line pt-4">
-      <p className="text-xs font-semibold uppercase tracking-[0.16em] text-mist/70">Local status</p>
+      <p className="text-xs font-semibold uppercase tracking-[0.16em] text-mist/70">Status</p>
       <StatusPill ok={youtubeReady} label={youtubeLabel} />
       <StatusPill ok={spotifyConnected} label={spotifyConnected ? "Spotify connected" : "Spotify optional"} />
-      <StatusPill ok={Boolean(modelInstalled)} label={modelInstalled ? "Gemma ready" : "Gemma offline"} />
+      <StatusPill ok={Boolean(modelInstalled)} label={writerLabel ?? (modelInstalled ? "Gemma ready" : "Gemma offline")} />
     </div>
   );
 }

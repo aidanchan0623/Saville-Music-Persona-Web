@@ -54,6 +54,7 @@ SHARED_CACHE_KEYS = {
     "genre_metadata_cache",
     "release_year_cache_v1",
     "track_metadata_cache_v1",
+    "usage:hosted_llm_global",
 }
 
 

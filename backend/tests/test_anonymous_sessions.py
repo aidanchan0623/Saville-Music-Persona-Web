@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -27,6 +28,28 @@ def anonymous_repository(path: Path) -> JsonRepository:
         namespace_resolver=current_session_namespace,
         shared_key_predicate=is_shared_cache_key,
     )
+
+
+def test_hosted_writer_status_and_budgets_do_not_expose_secrets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = anonymous_repository(tmp_path / "writer-budget.db")
+    monkeypatch.setattr(routes, "repo", repository)
+    monkeypatch.setattr(routes.settings, "deployment_mode", "anonymous")
+    monkeypatch.setattr(routes.settings, "hosted_llm_provider", "openai-compatible")
+    monkeypatch.setattr(routes.settings, "hosted_llm_api_key", "never-return-this-key")
+    monkeypatch.setattr(routes.settings, "hosted_llm_model", "bounded-writer")
+    monkeypatch.setattr(routes.settings, "hosted_llm_requests_per_session_hour", 2)
+    monkeypatch.setattr(routes.settings, "hosted_llm_requests_global_day", 1)
+
+    status = routes.runtime_providers()
+    assert status["reportWriter"]["configured"] is True
+    assert "never-return-this-key" not in json.dumps(status)
+
+    with session_scope("1" * 64):
+        assert routes.consume_hosted_llm_budget() is None
+    with session_scope("2" * 64):
+        assert routes.consume_hosted_llm_budget() == "hosted_llm_global_budget_exhausted"
 
 
 def test_anonymous_middleware_issues_isolated_http_only_sessions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -63,7 +86,7 @@ def test_health_probes_do_not_create_visitor_sessions(tmp_path: Path, monkeypatc
     health = client.get("/api/health")
     ready = client.get("/api/ready")
     assert health.status_code == 200
-    assert health.json()["version"] == "0.3.0"
+    assert health.json()["version"] == "0.4.0"
     assert ready.status_code == 200
     assert ready.json()["workerTopology"] == "single-process"
     assert client.cookies.get(routes.settings.session_cookie_name) is None

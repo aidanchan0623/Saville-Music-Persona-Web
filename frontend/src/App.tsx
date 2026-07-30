@@ -73,6 +73,7 @@ export default function App() {
   const refreshAbortControllerRef = useRef<AbortController | null>(null);
   const durationAbortControllerRef = useRef<AbortController | null>(null);
   const genreAbortControllerRef = useRef<AbortController | null>(null);
+  const reportAbortControllerRef = useRef<AbortController | null>(null);
   const lastTakeoutFileRef = useRef<File | null>(null);
   const lastSpotifyHistoryFileRef = useRef<File | null>(null);
   const skipNextSourceLoadRef = useRef(false);
@@ -215,6 +216,7 @@ export default function App() {
     refreshAbortControllerRef.current?.abort();
     durationAbortControllerRef.current?.abort();
     genreAbortControllerRef.current?.abort();
+    reportAbortControllerRef.current?.abort();
   }, []);
 
   const refresh = async () => {
@@ -264,10 +266,25 @@ export default function App() {
   };
 
   const generateReport = async (period: "rolling_year" | "this_month" = "rolling_year"): Promise<{ ok: boolean; message: string }> => {
+    reportAbortControllerRef.current?.abort();
+    const controller = new AbortController();
+    reportAbortControllerRef.current = controller;
+    const activeSource = source;
     setBusy(true);
-    setMessage(runtime?.anonymous ? "Writing your private persona report..." : "Asking local Gemma to rewrite the deterministic Music Character profile...");
+    setMessage(runtime?.anonymous ? "Queuing your private persona report..." : "Queuing the local Gemma report writer...");
     try {
-      const nextReport = await api.generateReport("roast", source, period);
+      const queued = await api.startReportGeneration("roast", activeSource, period);
+      const result = await pollTakeoutImport(
+        (signal) => api.reportGenerationStatus(queued.jobId, signal),
+        {
+          signal: controller.signal,
+          intervalMs: 700,
+          timeoutMs: 75_000,
+          onStatus: (status) => setMessage(`${status.message} (${status.progress}%)`),
+        },
+      );
+      if (!result.report) throw new Error("The report writer finished without a validated report. Please retry.");
+      const nextReport = result.report;
       setReport(nextReport);
       navigate("report");
       void loadStatus().catch(() => undefined);
@@ -279,6 +296,7 @@ export default function App() {
       setMessage(message);
       return { ok: false, message };
     } finally {
+      if (reportAbortControllerRef.current === controller) reportAbortControllerRef.current = null;
       setBusy(false);
     }
   };
@@ -374,6 +392,7 @@ export default function App() {
         }
         setCanRetrySpotifyHistory(false);
         setMessage(`${result.message} Imported ${result.importedCount ?? 0} Spotify plays.`);
+        void enrichGenresInBackground("spotify", true);
         completed = true;
       } catch (error) {
         if (!(error instanceof DOMException && error.name === "AbortError")) {
@@ -402,7 +421,10 @@ export default function App() {
     durationAbortControllerRef.current = controller;
     try {
       const queued = await api.startDurationEnrichment();
-      if (queued.status === "complete" || queued.status === "idle") return;
+      if (queued.status === "complete" || queued.status === "idle") {
+        void enrichGenresInBackground("youtube", false);
+        return;
+      }
       const result = await pollTakeoutImport(
         (signal) => api.durationEnrichmentStatus(signal),
         {
@@ -415,6 +437,7 @@ export default function App() {
       );
       await loadAnalysis("youtube");
       setMessage(result.message);
+      void enrichGenresInBackground("youtube", true);
     } catch (error) {
       if (!(error instanceof DOMException && error.name === "AbortError")) {
         setMessage(error instanceof Error ? error.message : "Track duration enrichment could not finish. Your existing analysis is still available.");
@@ -424,35 +447,43 @@ export default function App() {
     }
   };
 
+  const enrichGenresInBackground = async (activeSource: MusicSource, announce: boolean) => {
+    genreAbortControllerRef.current?.abort();
+    const controller = new AbortController();
+    genreAbortControllerRef.current = controller;
+    if (announce) setMessage("Checking the reusable genre and artwork catalogue...");
+    try {
+      const queued = await api.startGenreEnrichment(activeSource);
+      const result = queued.status === "complete"
+        ? queued
+        : await pollTakeoutImport(
+            (signal) => api.genreEnrichmentStatus(signal),
+            {
+              signal: controller.signal,
+              intervalMs: 1200,
+              timeoutMs: 5 * 60 * 1000,
+              onStatus: announce ? (status) => setMessage(`${status.message} (${status.progress}%)`) : undefined,
+            },
+          );
+      await loadAnalysis(activeSource);
+      if (announce) {
+        const coverage = result.afterCoverage == null ? "updated" : `${result.afterCoverage.toFixed(1)}%`;
+        setMessage(`Metadata enrichment finished: ${result.matched ?? 0} artist and ${result.recordingMatched ?? 0} recording match(es), coverage ${coverage}.`);
+      }
+      return result;
+    } catch (error) {
+      if (!(error instanceof DOMException && error.name === "AbortError") && announce) {
+        setMessage(error instanceof Error ? error.message : "Metadata enrichment could not finish. Your existing analysis is still available.");
+      }
+      return null;
+    } finally {
+      if (genreAbortControllerRef.current === controller) genreAbortControllerRef.current = null;
+    }
+  };
+
   const improveGenres = async () => {
     const started = await runExclusiveOperation(operationInFlightRef, setBusy, async () => {
-      genreAbortControllerRef.current?.abort();
-      const controller = new AbortController();
-      genreAbortControllerRef.current = controller;
-      setMessage("Queuing confidence-checked MusicBrainz genre enrichment...");
-      try {
-        const queued = await api.startGenreEnrichment();
-        const result = queued.status === "complete"
-          ? queued
-          : await pollTakeoutImport(
-              (signal) => api.genreEnrichmentStatus(signal),
-              {
-                signal: controller.signal,
-                intervalMs: 1200,
-                timeoutMs: 5 * 60 * 1000,
-                onStatus: (status) => setMessage(`${status.message} (${status.progress}%)`),
-              },
-            );
-        await loadAnalysis("youtube");
-        const coverage = result.afterCoverage == null ? "updated" : `${result.afterCoverage.toFixed(1)}%`;
-        setMessage(`Genre enrichment finished: ${result.matched ?? 0} artist match(es), coverage ${coverage}.`);
-      } catch (error) {
-        if (!(error instanceof DOMException && error.name === "AbortError")) {
-          setMessage(error instanceof Error ? error.message : "Genre enrichment could not finish. Your existing analysis is still available.");
-        }
-      } finally {
-        if (genreAbortControllerRef.current === controller) genreAbortControllerRef.current = null;
-      }
+      await enrichGenresInBackground(source, true);
     });
     if (!started) setMessage("Another data operation is already running. Wait for it to finish before enriching genres.");
   };
@@ -656,7 +687,7 @@ export default function App() {
           />
         </Suspense>
       </div>
-      <DesktopSidebar activePage={page} collapsed={sidebarCollapsed} youtubeReady={youtubeReady} youtubeLabel={youtubeLabel} spotifyConnected={Boolean(spotifyStatus?.connected || spotifyStatus?.cached_data_available)} modelInstalled={Boolean(prerequisites?.ollama_reachable && prerequisites.model_installed)} onToggle={() => setSidebarCollapsed((value) => !value)} onNavigate={navigate} />
+      <DesktopSidebar activePage={page} collapsed={sidebarCollapsed} youtubeReady={youtubeReady} youtubeLabel={youtubeLabel} spotifyConnected={Boolean(spotifyStatus?.connected || spotifyStatus?.cached_data_available)} modelInstalled={runtime?.anonymous ? true : Boolean(prerequisites?.ollama_reachable && prerequisites.model_installed)} writerLabel={runtime?.anonymous ? "Report writer ready" : undefined} onToggle={() => setSidebarCollapsed((value) => !value)} onNavigate={navigate} />
 
       {mobileOpen ? (
         <div className="fixed inset-0 z-40 lg:hidden">
@@ -724,7 +755,12 @@ export default function App() {
 }
 
 function reportGenerationMessage(source: PersonaReport["generation"]["source"], fallbackReason: string | null, anonymous = false) {
-  if (anonymous) return source === "fallback" ? "Persona report generated with the private deterministic writer." : "Persona report generated for this anonymous session.";
+  if (anonymous) {
+    if (source === "hosted-llm" || source === "cache-hosted-llm") return "Persona report generated by the privacy-bounded hosted writer.";
+    return fallbackReason?.includes("budget")
+      ? "The hosted writing allowance is busy or exhausted; the private deterministic writer completed your report."
+      : "Persona report generated with the private deterministic writer.";
+  }
   if (source !== "fallback") return "Persona report regenerated locally with Gemma.";
   if (fallbackReason === "ollama_timeout") return "Gemma is available but did not finish in time; the report uses the local fallback.";
   if (fallbackReason === "model_not_installed") return "Gemma is not installed; the report uses the local fallback.";

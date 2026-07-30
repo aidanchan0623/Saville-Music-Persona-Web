@@ -65,6 +65,8 @@ from app.schemas.responses import (
     DurationEnrichmentStatusResponse,
     GenreEnrichmentStatusResponse,
     ReportRequest,
+    ReportGenerationQueuedResponse,
+    ReportGenerationStatusResponse,
     SessionDeleteResponse,
     SessionStatusResponse,
     TakeoutImportQueuedResponse,
@@ -95,7 +97,13 @@ from app.services.genre_enrichment_service import (
     seed_cache_from_source,
 )
 from app.services.ollama_service import OllamaService
+from app.services.hosted_language_service import HostedLanguageService
 from app.services.recording_genre_service import MusicBrainzRecordingGenreService
+from app.services.report_generation_jobs import (
+    ReportGenerationAlreadyRunning,
+    ReportGenerationCapacityReached,
+    ReportGenerationCoordinator,
+)
 from app.services.refresh_jobs import RefreshAlreadyRunning, RefreshCoordinator
 from app.services.recommendations import generate_recommendations
 from app.services.spotify_service import SpotifyService
@@ -129,6 +137,7 @@ repo = JsonRepository(
 )
 ytmusic = YTMusicService(settings)
 ollama = OllamaService(settings)
+hosted_language = HostedLanguageService(settings, ollama)
 spotify = SpotifyService(settings)
 import_capacity = ImportCapacity(settings.anonymous_max_concurrent_imports) if settings.anonymous_mode else None
 takeout_imports = TakeoutImportCoordinator(
@@ -147,6 +156,11 @@ duration_enrichment = DurationEnrichmentCoordinator(repo, settings.duration_enri
 genre_enrichment_service = MusicBrainzGenreService()
 recording_genre_enrichment_service = MusicBrainzRecordingGenreService()
 genre_enrichment = GenreEnrichmentCoordinator(repo, settings.genre_enrichment_timeout_seconds)
+report_generation = ReportGenerationCoordinator(
+    repo,
+    settings.report_generation_timeout_seconds,
+    settings.anonymous_max_concurrent_reports,
+)
 refresh_jobs = RefreshCoordinator(repo, settings.refresh_timeout_seconds)
 session_cleanup = SessionCleanupService(
     repo,
@@ -218,7 +232,7 @@ def require_account_connections() -> None:
         )
 
 PERSONA_REPORT_SCHEMA_VERSION = 8
-PERSONA_REPORT_PROMPT_VERSION = 10
+PERSONA_REPORT_PROMPT_VERSION = 11
 PERSONA_REPORT_PERIOD = "rolling_year"
 PERSONA_REPORT_PERIODS = {"rolling_year", "this_month"}
 OVERVIEW_FALLBACK_CACHE_SECONDS = 300
@@ -249,8 +263,20 @@ def persona_report_fingerprint(profile: dict[str, Any]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:20]
 
 
+def active_report_model() -> str:
+    if settings.anonymous_mode:
+        return settings.hosted_llm_model if settings.hosted_llm_enabled else "deterministic-writer-v1"
+    return settings.ollama_model
+
+
+def active_report_provider() -> str:
+    if settings.anonymous_mode:
+        return settings.hosted_llm_provider if settings.hosted_llm_enabled else "deterministic"
+    return "ollama"
+
+
 def persona_report_cache_key(source: str, mode: str, analytics_fingerprint: str, period: str = PERSONA_REPORT_PERIOD) -> str:
-    model_fingerprint = hashlib.sha256(settings.ollama_model.encode("utf-8")).hexdigest()[:8]
+    model_fingerprint = hashlib.sha256(active_report_model().encode("utf-8")).hexdigest()[:8]
     return (
         f"persona_report:{source}:{period}:v{PERSONA_REPORT_SCHEMA_VERSION}:"
         f"analytics{ANALYTICS_VERSION}:genre{GENRE_MAP_VERSION}:"
@@ -275,7 +301,7 @@ def persona_report_pointer_is_current(pointer: Any, source: str, normalised_upda
         and pointer.get("genreMapVersion") == GENRE_MAP_VERSION
         and pointer.get("musicalAgeCalculationVersion") == MUSICAL_AGE_CALCULATION_VERSION
         and pointer.get("personalityClassifierVersion") == MUSIC_CHARACTER_CLASSIFIER_VERSION
-        and pointer.get("model") == settings.ollama_model
+        and pointer.get("model") == active_report_model()
         and pointer.get("normalisedUpdatedAt") == normalised_updated_at
         and bool(pointer.get("cacheKey"))
     )
@@ -295,7 +321,7 @@ def save_persona_report_pointer(source: str, mode: str, analytics_fingerprint: s
             "genreMapVersion": GENRE_MAP_VERSION,
             "musicalAgeCalculationVersion": MUSICAL_AGE_CALCULATION_VERSION,
             "personalityClassifierVersion": MUSIC_CHARACTER_CLASSIFIER_VERSION,
-            "model": settings.ollama_model,
+            "model": active_report_model(),
             "analyticsFingerprint": analytics_fingerprint,
             "normalisedUpdatedAt": repo.updated_at(cache_key("normalised", source)),
             "generatedAt": generated_at,
@@ -739,7 +765,7 @@ def health() -> dict[str, Any]:
     return {
         "ok": True,
         "app": "Saville Music Persona Web",
-        "version": "0.3.0",
+        "version": "0.4.0",
         "mode": settings.deployment_mode,
         "time": datetime.now(timezone.utc).isoformat(),
     }
@@ -841,10 +867,16 @@ def delete_session(response: Response) -> SessionDeleteResponse:
 @router.get("/prerequisites", response_model=PrerequisitesResponse)
 def prerequisites() -> PrerequisitesResponse:
     if settings.anonymous_mode:
+        writer = hosted_language.status()
         return PrerequisitesResponse(
             ok=True,
-            items=[PrerequisiteItem(name="Anonymous import service", available=True, detail="Ready")],
-            ollama_model="deterministic-fallback",
+            items=[
+                PrerequisiteItem(name="Anonymous import service", available=True, detail="Ready"),
+                PrerequisiteItem(name="Hosted report writer", available=True, detail=writer["message"]),
+            ],
+            ollama_model=active_report_model(),
+            # These legacy fields specifically gate the local character
+            # rewrite endpoint. Hosted report writing is reported separately.
             ollama_reachable=False,
             model_installed=False,
             local_timezone=settings.local_timezone,
@@ -1641,23 +1673,27 @@ def duration_enrichment_status() -> DurationEnrichmentStatusResponse:
     return DurationEnrichmentStatusResponse.model_validate(job)
 
 
-def process_genre_enrichment(coordinator: GenreEnrichmentCoordinator, deadline: float) -> None:
-    cached_normalised = repo.load_json("normalised")
+def process_genre_enrichment(coordinator: GenreEnrichmentCoordinator, deadline: float, source: str = "youtube") -> None:
+    resolved_source = normalise_source(source)
+    normalised_key = cache_key("normalised", resolved_source)
+    analysis_key = cache_key("analysis", resolved_source)
+    cached_normalised = repo.load_json(normalised_key)
     if not isinstance(cached_normalised, dict) or not cached_normalised.get("tracks"):
-        coordinator.fail("No YouTube listening profile is available to enrich yet.", "genre_profile_missing")
+        coordinator.fail(f"No {resolved_source.title()} listening profile is available to enrich yet.", "genre_profile_missing")
         return
 
     working_normalised = copy.deepcopy(cached_normalised)
     recording_catalog = current_recording_catalog()
     cache = durable_genre_cache()
     apply_genre_cache(working_normalised, cache)
-    recording_catalog.sync_normalised(working_normalised, profile_source=recording_profile_source("youtube"))
+    recording_catalog.sync_normalised(working_normalised, profile_source=recording_profile_source(resolved_source))
     before_analysis = build_analysis(working_normalised)
     before_coverage = genre_coverage_payload(before_analysis)
     coordinator.stage(
         "resolving",
         "Checking high-impact unclassified artists, then recordings, against MusicBrainz.",
         provider="musicbrainz",
+        source=resolved_source,
         beforeCoverage=before_coverage["genreCoveragePercent"],
     )
     # Exact artist evidence has much higher coverage per request. Give it the
@@ -1681,14 +1717,18 @@ def process_genre_enrichment(coordinator: GenreEnrichmentCoordinator, deadline: 
         "resolving",
         "Artist evidence applied; checking the remaining high-impact recordings.",
         provider="musicbrainz",
+        source=resolved_source,
         beforeCoverage=before_coverage["genreCoveragePercent"],
         **stats,
     )
+    track_metadata_cache = ensure_track_metadata_cache(repo.load_json("track_metadata_cache_v1") or {})
     recording_stats = recording_genre_enrichment_service.enrich(
         working_normalised,
         recording_catalog,
         limit=settings.recording_genre_enrichment_limit,
         deadline=resolution_deadline,
+        metadata_cache=track_metadata_cache,
+        on_update=lambda: repo.save_json("track_metadata_cache_v1", track_metadata_cache),
     )
     stats.update(recording_stats)
 
@@ -1696,26 +1736,33 @@ def process_genre_enrichment(coordinator: GenreEnrichmentCoordinator, deadline: 
         "rebuilding",
         "Applying trusted genre matches and rebuilding local analytics.",
         provider="musicbrainz",
+        source=resolved_source,
         beforeCoverage=before_coverage["genreCoveragePercent"],
         **stats,
     )
     # Another import or metadata job may have completed while MusicBrainz was
     # rate-limited. Always apply this batch to the newest canonical profile.
-    latest_normalised = repo.load_json("normalised")
+    latest_normalised = repo.load_json(normalised_key)
     if isinstance(latest_normalised, dict) and latest_normalised.get("tracks"):
         working_normalised = copy.deepcopy(latest_normalised)
     apply_genre_cache(working_normalised, cache)
-    recording_catalog.sync_normalised(working_normalised, profile_source=recording_profile_source("youtube"))
+    apply_track_metadata_cache(working_normalised, track_metadata_cache)
+    recording_catalog.sync_normalised(working_normalised, profile_source=recording_profile_source(resolved_source))
     rebuilt_analysis = build_analysis(working_normalised)
     after_coverage = genre_coverage_payload(rebuilt_analysis)
     repo.save_json_batch(
         {
             "genre_metadata_cache": cache,
-            "normalised": working_normalised,
-            "analysis": rebuilt_analysis,
+            "track_metadata_cache_v1": track_metadata_cache,
+            normalised_key: working_normalised,
+            analysis_key: rebuilt_analysis,
         },
-        delete_keys=["latest_report", "recommendations"],
-        delete_prefixes=["persona_report:", "persona_report_pointer:", "overview_language:"],
+        delete_keys=[cache_key("latest_report", resolved_source), cache_key("recommendations", resolved_source)],
+        delete_prefixes=[
+            f"persona_report:{resolved_source}:",
+            f"persona_report_pointer:{resolved_source}:",
+            f"overview_language:{resolved_source}:",
+        ],
     )
     clear_analytics_memory_caches()
     gain = round(after_coverage["genreCoveragePercent"] - before_coverage["genreCoveragePercent"], 1)
@@ -1729,7 +1776,8 @@ def process_genre_enrichment(coordinator: GenreEnrichmentCoordinator, deadline: 
     coordinator.stage(
         "complete",
         f"Genre enrichment complete. Coverage is {after_coverage['genreCoveragePercent']:.1f}% ({gain:+.1f} points).{provider_note}",
-        provider="musicbrainz",
+        provider="musicbrainz+cover-art-archive",
+        source=resolved_source,
         beforeCoverage=before_coverage["genreCoveragePercent"],
         afterCoverage=after_coverage["genreCoveragePercent"],
         unknownEventCount=after_coverage["unknownEventCount"],
@@ -1746,9 +1794,10 @@ def genre_coverage_payload(analysis: dict[str, Any]) -> dict[str, Any]:
 
 
 @router.post("/data/genre-enrichment", response_model=GenreEnrichmentStatusResponse, status_code=202)
-def start_genre_enrichment() -> GenreEnrichmentStatusResponse:
+def start_genre_enrichment(source: str = Query("youtube")) -> GenreEnrichmentStatusResponse:
+    resolved_source = normalise_source(source)
     try:
-        job = genre_enrichment.start(process_genre_enrichment)
+        job = genre_enrichment.start(lambda coordinator, deadline: process_genre_enrichment(coordinator, deadline, resolved_source))
     except GenreEnrichmentAlreadyRunning as exc:
         existing = genre_enrichment.status()
         if existing:
@@ -2151,8 +2200,46 @@ def report_profile_with_characters(source: str | None = "youtube", period: str =
     return build_persona_report_evidence(normalised, settings.local_timezone, period)
 
 
-@router.post("/report/generate", response_model=PersonaReportResponse)
-def generate_report(request: ReportRequest) -> PersonaReportResponse:
+def consume_hosted_llm_budget() -> str | None:
+    if not settings.hosted_llm_enabled:
+        return "hosted_llm_not_configured"
+    session_allowed, _, _ = repo.consume_rate_limit(
+        "usage:hosted_llm_session",
+        limit=settings.hosted_llm_requests_per_session_hour,
+        window_seconds=60 * 60,
+    )
+    if not session_allowed:
+        return "hosted_llm_session_budget_exhausted"
+    global_allowed, _, _ = repo.consume_rate_limit(
+        "usage:hosted_llm_global",
+        limit=settings.hosted_llm_requests_global_day,
+        window_seconds=24 * 60 * 60,
+    )
+    return None if global_allowed else "hosted_llm_global_budget_exhausted"
+
+
+@router.get("/runtime/providers")
+def runtime_providers() -> dict[str, Any]:
+    """Expose capabilities and limits without leaking credentials."""
+    writer = hosted_language.status()
+    return {
+        "reportWriter": {
+            "configured": writer["configured"],
+            "provider": writer["provider"],
+            "model": writer["model"],
+            "fallbackAvailable": True,
+            "requestsPerSessionHour": settings.hosted_llm_requests_per_session_hour,
+            "message": writer["message"],
+        },
+        "metadata": {
+            "sources": ["uploaded provider metadata", "shared exact-match cache", "MusicBrainz", "Cover Art Archive"],
+            "identityPolicy": "exact identifiers first; title, artist, duration, and version safeguards otherwise",
+            "sharedCacheContainsListeningHistory": False,
+        },
+    }
+
+
+def build_report(request: ReportRequest) -> PersonaReportResponse:
     source = normalise_source(request.source)
     period = request.period
     # A repeated click should never rebuild analytics and wake Gemma for the
@@ -2169,26 +2256,35 @@ def generate_report(request: ReportRequest) -> PersonaReportResponse:
         if (
             isinstance(cached, dict)
             and cached.get("schemaVersion") == PERSONA_REPORT_SCHEMA_VERSION
-            and (cached.get("generation") or {}).get("source") in {"gemma", "cache-gemma"}
+            and (cached.get("generation") or {}).get("source") in {
+                "gemma",
+                "cache-gemma",
+                "hosted-llm",
+                "cache-hosted-llm",
+            }
         ):
             return PersonaReportResponse.model_validate(cached)
     profile = report_profile_with_characters(source, period)
     analytics_fingerprint = persona_report_fingerprint(profile)
     report_cache_key = persona_report_cache_key(source, request.mode, analytics_fingerprint, period)
-    language = (
-        ollama.fallback_persona_language(profile["languageEvidence"], "anonymous_hosted_mode").model_dump()
-        if settings.anonymous_mode
-        else ollama.generate_persona_language(profile["languageEvidence"], request.mode).model_dump()
-    )
+    if settings.anonymous_mode:
+        budget_reason = consume_hosted_llm_budget()
+        language_model = (
+            ollama.fallback_persona_language(profile["languageEvidence"], budget_reason).model_dump()
+            if budget_reason
+            else hosted_language.generate_persona_language(profile["languageEvidence"], request.mode).model_dump()
+        )
+    else:
+        language_model = ollama.generate_persona_language(profile["languageEvidence"], request.mode).model_dump()
     generated_at = datetime.now(timezone.utc).isoformat()
     payload = compose_persona_report(
         profile,
-        language,
+        language_model,
         source=source,
         mode=request.mode,
         generated_at=generated_at,
         prompt_version=PERSONA_REPORT_PROMPT_VERSION,
-        model=settings.ollama_model,
+        model=active_report_model(),
         analytics_fingerprint=analytics_fingerprint,
         cache_key=report_cache_key,
     )
@@ -2196,6 +2292,72 @@ def generate_report(request: ReportRequest) -> PersonaReportResponse:
     repo.save_json(report_cache_key, payload)
     save_persona_report_pointer(source, request.mode, analytics_fingerprint, report_cache_key, generated_at, period)
     return validated
+
+
+@router.post("/report/generate", response_model=PersonaReportResponse)
+def generate_report(request: ReportRequest) -> PersonaReportResponse:
+    """Compatibility endpoint; hosted clients should use the progress job API."""
+    return build_report(request)
+
+
+def process_report_generation(
+    job_id: str,
+    coordinator: ReportGenerationCoordinator,
+    deadline: float,
+    request: ReportRequest,
+) -> None:
+    coordinator.stage(job_id, "building", "Building the deterministic listening evidence.")
+    coordinator.check_timeout(deadline)
+    coordinator.stage(
+        job_id,
+        "writing",
+        "Writing bounded report language." if settings.hosted_llm_enabled else "Applying the deterministic report writer.",
+    )
+    report = build_report(request)
+    coordinator.check_timeout(deadline)
+    coordinator.stage(job_id, "saving", "Validating and saving the report.")
+    coordinator.stage(
+        job_id,
+        "complete",
+        "Persona report is ready.",
+        provider=active_report_provider(),
+        report=report.model_dump(),
+    )
+
+
+@router.post("/report/jobs", response_model=ReportGenerationQueuedResponse, status_code=202)
+def start_report_generation(request: ReportRequest) -> ReportGenerationQueuedResponse:
+    # Fail before queuing when no profile exists; background failures should be
+    # reserved for provider/runtime problems, not a missing upload.
+    require_source_cache("normalised", request.source)
+    try:
+        job = report_generation.start(
+            active_report_provider(),
+            lambda job_id, coordinator, deadline: process_report_generation(job_id, coordinator, deadline, request),
+        )
+    except ReportGenerationAlreadyRunning as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "Report already running", "detail": str(exc), "code": "report_generation_in_progress"},
+        ) from exc
+    except ReportGenerationCapacityReached as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "Report writer busy", "detail": str(exc), "code": "report_generation_capacity_reached"},
+            headers={"Retry-After": "30"},
+        ) from exc
+    return ReportGenerationQueuedResponse(jobId=str(job["jobId"]), status=str(job["status"]))
+
+
+@router.get("/report/jobs/{job_id}", response_model=ReportGenerationStatusResponse)
+def report_generation_status(job_id: str) -> ReportGenerationStatusResponse:
+    job = report_generation.get(job_id)
+    if not job:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": "Report job not found", "detail": "Retry report generation.", "code": "report_generation_job_not_found"},
+        )
+    return ReportGenerationStatusResponse.model_validate(job)
 
 
 @router.get("/report/latest", response_model=PersonaReportResponse)
@@ -2213,6 +2375,10 @@ def latest_report(source: str = Query("youtube"), period: str = Query(PERSONA_RE
                 payload["generation"] = {**payload["generation"], "source": "cache-gemma"}
                 payload["personality"] = {**payload["personality"], "generationSource": "cache-gemma"}
                 payload["summary"] = {**payload["summary"], "generationSource": "cache-gemma"}
+            elif (payload.get("generation") or {}).get("source") == "hosted-llm":
+                payload["generation"] = {**payload["generation"], "source": "cache-hosted-llm"}
+                payload["personality"] = {**payload["personality"], "generationSource": "cache-hosted-llm"}
+                payload["summary"] = {**payload["summary"], "generationSource": "cache-hosted-llm"}
             return PersonaReportResponse.model_validate(payload)
 
     profile = report_profile_with_characters(resolved_source, period)
@@ -2228,7 +2394,7 @@ def latest_report(source: str = Query("youtube"), period: str = Query(PERSONA_RE
         mode=mode,
         generated_at=generated_at,
         prompt_version=PERSONA_REPORT_PROMPT_VERSION,
-        model=settings.ollama_model,
+        model=active_report_model(),
         analytics_fingerprint=analytics_fingerprint,
         cache_key=report_cache_key,
     )

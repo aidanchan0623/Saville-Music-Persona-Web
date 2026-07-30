@@ -82,6 +82,41 @@ SMP_ANONYMOUS_MAX_CONCURRENT_IMPORTS=2
 SMP_ACCESS_LOG=false
 ```
 
+## Phase 4 optional hosted report writer
+
+All analytics remain local to Saville's backend and deterministic. The optional writer receives only compact, derived report evidence needed to rewrite six bounded text fields: the selected personality label, strongest calculated signals, known artist/genre allow-lists, and Musical Age resolution state. It does not receive the uploaded archive, listening-event rows, timestamps, source URLs, account identifiers, or browser cookie. Provider output is strict-JSON validated against the supplied allow-lists before use.
+
+Configure these values as hosting secrets/environment variables, never in source control:
+
+```text
+SMP_HOSTED_LLM_PROVIDER=openai-compatible
+SMP_HOSTED_LLM_BASE_URL=https://api.openai.com/v1
+SMP_HOSTED_LLM_API_KEY=your-server-side-secret
+SMP_HOSTED_LLM_MODEL=your-compatible-chat-model
+SMP_HOSTED_LLM_TIMEOUT_SECONDS=20
+SMP_HOSTED_LLM_MAX_OUTPUT_TOKENS=700
+SMP_HOSTED_LLM_REQUESTS_PER_SESSION_HOUR=4
+SMP_HOSTED_LLM_REQUESTS_GLOBAL_DAY=200
+SMP_REPORT_GENERATION_TIMEOUT_SECONDS=35
+SMP_ANONYMOUS_MAX_CONCURRENT_REPORTS=2
+```
+
+Leaving `SMP_HOSTED_LLM_PROVIDER=disabled`, the key blank, or the model blank makes no remote call. Provider errors, invalid JSON, timeouts, quota exhaustion, and service restarts fail closed to Saville's deterministic writer. `/api/runtime/providers` reports safe capability information but never returns the API key. Report jobs are session-scoped and polled through `/api/report/jobs/{job_id}`.
+
+The adapter targets the commonly supported Chat Completions shape at `/chat/completions`. Verify a different provider's JSON response mode and data-retention terms before enabling it. Hosting-provider infrastructure logs remain a separate privacy concern.
+
+## Phase 4 metadata enrichment
+
+The browser starts metadata enrichment automatically after either import type. Shared caches contain reusable public song, artist, album, artwork, duration, release-year, and genre evidence only; they never contain listening events or a user's rankings. The hierarchy is deliberately conservative:
+
+1. Reuse metadata included by the uploaded provider.
+2. Reuse an exact identifier or previously confidence-gated cache match.
+3. Resolve a unique exact MusicBrainz artist for broad genre coverage.
+4. Resolve unresolved recordings with title, artist, duration, album, and version safeguards.
+5. Fetch release-group artwork from Cover Art Archive only after recording identity clears the automatic threshold.
+
+External lookups are bounded by batch size and job deadline. Completed evidence is checkpointed and reused by later anonymous sessions. A failed lookup leaves the current deterministic profile intact.
+
 ## Free-hosting trade-off
 
 The container can run on a free container service if it supports the image and at least 100 MB request bodies. Many free services provide only an ephemeral filesystem. Saville will still work there, but a restart may erase active sessions and the shared metadata cache. That failure mode is privacy-safe, but it is not durable.
@@ -111,4 +146,4 @@ Saville does not add product analytics, user accounts, email addresses, or a dev
 
 ## What Phase 3 does not include
 
-Phase 3 does not add a hosted LLM, external metadata provider credentials, multi-replica scaling, or production analytics/alerting. Those remain Phase 4 and Phase 5 work.
+Phase 4 adds an optional hosted LLM adapter and credential-free MusicBrainz/Cover Art Archive enrichment. Multi-replica scaling and production analytics/alerting remain Phase 5 work.

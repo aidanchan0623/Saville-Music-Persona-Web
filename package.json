@@ -1,7 +1,7 @@
 {
   "name": "saville-music-persona-web",
   "private": true,
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Anonymous hosted music-history analysis for Google Takeout and Spotify exports.",
   "scripts": {
     "setup": "powershell -ExecutionPolicy Bypass -File ./scripts/setup_windows.ps1",

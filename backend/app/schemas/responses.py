@@ -122,6 +122,7 @@ class GenreEnrichmentStatusResponse(BaseModel):
     message: str
     errorCode: str | None = None
     provider: str = "musicbrainz"
+    source: Literal["youtube", "spotify"] = "youtube"
     attempted: int | None = None
     matched: int | None = None
     failed: int | None = None
@@ -136,6 +137,7 @@ class GenreEnrichmentStatusResponse(BaseModel):
     recordingFailed: int | None = None
     recordingRemainingCandidates: int | None = None
     recordingProviderError: str | None = None
+    recordingMetadataAdded: int | None = None
     beforeCoverage: float | None = None
     afterCoverage: float | None = None
     unknownEventCount: int | None = None
@@ -351,6 +353,24 @@ class ReportRequest(BaseModel):
     period: Literal["rolling_year", "this_month"] = "rolling_year"
 
 
+class ReportGenerationQueuedResponse(BaseModel):
+    jobId: str
+    status: str
+
+
+class ReportGenerationStatusResponse(BaseModel):
+    jobId: str
+    status: str
+    progress: int
+    message: str
+    errorCode: str | None = None
+    provider: str | None = None
+    createdAt: str | None = None
+    updatedAt: str | None = None
+    finishedAt: str | None = None
+    report: dict[str, Any] | None = None
+
+
 class StrictReportModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -370,7 +390,7 @@ class ReportPersonality(StrictReportModel):
     roastDescription: str
     confidence: float = Field(ge=0, le=1)
     habits: list[str] = Field(max_length=3)
-    generationSource: Literal["gemma", "cache-gemma", "fallback"]
+    generationSource: Literal["gemma", "cache-gemma", "hosted-llm", "cache-hosted-llm", "fallback"]
 
 
 class ReportGenre(StrictReportModel):
@@ -433,7 +453,7 @@ class ReportSummary(StrictReportModel):
     headline: str
     body: str
     finalLine: str
-    generationSource: Literal["gemma", "cache-gemma", "fallback"]
+    generationSource: Literal["gemma", "cache-gemma", "hosted-llm", "cache-hosted-llm", "fallback"]
 
 
 class ReportBackgroundAlbum(StrictReportModel):
@@ -445,7 +465,7 @@ class ReportBackgroundAlbum(StrictReportModel):
 
 
 class ReportGeneration(StrictReportModel):
-    source: Literal["gemma", "cache-gemma", "fallback"]
+    source: Literal["gemma", "cache-gemma", "hosted-llm", "cache-hosted-llm", "fallback"]
     model: str
     promptVersion: int
     generatedAt: str

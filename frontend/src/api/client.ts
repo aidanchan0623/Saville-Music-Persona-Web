@@ -10,6 +10,8 @@ import type {
   MusicCharacterRewrite,
   OverviewResponse,
   PersonaReport,
+  ReportGenerationQueued,
+  ReportGenerationStatus,
   TopAlbumSongsResponse,
   TopAlbumsResponse,
   TopArtistSongsResponse,
@@ -137,7 +139,7 @@ export const api = {
     request<TakeoutImportStatus>(`/data/import-spotify-history/${encodeURIComponent(jobId)}`, { signal }),
   startDurationEnrichment: () => request<DurationEnrichmentStatus>("/data/duration-enrichment", { method: "POST", body: "{}" }),
   durationEnrichmentStatus: (signal?: AbortSignal) => request<DurationEnrichmentStatus>("/data/duration-enrichment", { signal }),
-  startGenreEnrichment: () => request<GenreEnrichmentStatus>("/data/genre-enrichment", { method: "POST", body: "{}" }),
+  startGenreEnrichment: (source: MusicSource = "youtube") => request<GenreEnrichmentStatus>(`/data/genre-enrichment?${paramsWithSource(source).toString()}`, { method: "POST", body: "{}" }),
   genreEnrichmentStatus: (signal?: AbortSignal) => request<GenreEnrichmentStatus>("/data/genre-enrichment", { signal }),
   overview: (period = "this_month", month?: string | null, source: MusicSource = "youtube") => {
     const params = paramsWithSource(source, { period, month });
@@ -193,6 +195,10 @@ export const api = {
     request<PersonaReport>(`/report/latest?${paramsWithSource(source, { period }).toString()}`),
   generateReport: (mode: "serious" | "playful" | "roast", source: MusicSource = "youtube", period: "rolling_year" | "this_month" = "rolling_year") =>
     request<PersonaReport>("/report/generate", { method: "POST", body: JSON.stringify({ mode, source, period }) }),
+  startReportGeneration: (mode: "serious" | "playful" | "roast", source: MusicSource = "youtube", period: "rolling_year" | "this_month" = "rolling_year") =>
+    request<ReportGenerationQueued>("/report/jobs", { method: "POST", body: JSON.stringify({ mode, source, period }) }),
+  reportGenerationStatus: (jobId: string, signal?: AbortSignal) =>
+    request<ReportGenerationStatus>(`/report/jobs/${encodeURIComponent(jobId)}`, { signal }),
   recommendations: () => analyticsRequest<{ items: Recommendation[] }>("/v1/recommendations").then((data) => data.items),
   generateRecommendations: () => request<Recommendation[]>("/recommendations/generate", { method: "POST", body: "{}" }),
   createPlaylist: (title: string) =>

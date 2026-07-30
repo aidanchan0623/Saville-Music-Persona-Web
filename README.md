@@ -2,7 +2,7 @@
 
 This repository is the anonymous hosted edition of Saville Music Persona. Visitors do not create an account or connect a music service: they upload a Google Takeout or Spotify extended streaming-history export, explore the generated dashboard, and can delete the session immediately. The original desktop/local edition remains in [Saville-Music-Persona](https://github.com/aidanchan0623/Saville-Music-Persona) at the `local-v1.0` tag.
 
-The deterministic analytics path needs no paid LLM API. Hosted report prose currently uses deterministic fallbacks; a bounded hosted LLM adapter is a later deployment phase.
+The deterministic analytics path needs no paid LLM API. Phase 4 adds an optional bounded server-side report writer; when it is disabled, busy, rate-limited, invalid, or timed out, the complete deterministic report remains available.
 
 ## Screenshots
 
@@ -20,7 +20,7 @@ Screenshots are intentionally left out until you run the app against your own pr
 - Deterministic Music Character classification from the canonical personality registry
 - Period-specific detected listening time, genre shares, and Top 5 rankings
 - Deterministic Musical Age with its rolling-year source period shown explicitly
-- Gemma-written descriptions and final roast with complete deterministic fallbacks
+- Optional hosted-writer descriptions and final roast with complete deterministic fallbacks
 - One persistent decorative album-dome background built from real ranked album covers
 - Evidence-driven recommendations
 - Connect YouTube Music settings page
@@ -35,11 +35,13 @@ flowchart LR
   API --> Spotify["Spotify OAuth + Web API optional"]
   API --> DB["SQLite + ignored raw JSON cache"]
   API --> Scoring["Deterministic scoring engine"]
-  API --> Ollama["Ollama localhost:11434 gemma3:4b"]
+  API --> Writer["Optional bounded hosted prose writer"]
+  API --> Metadata["MusicBrainz + Cover Art Archive"]
   Scoring --> API
   YTM --> API
   Spotify --> API
-  Ollama --> API
+  Writer --> API
+  Metadata --> API
 ```
 
 The Takeout integrity path is deliberately separate from presentation:
@@ -137,7 +139,7 @@ Default URLs:
 - Frontend: `http://localhost:5173`
 - Backend: `http://localhost:8000`
 
-## Anonymous hosted mode (Phases 1–2)
+## Anonymous hosted mode (Phases 1-4)
 
 Set `SMP_DEPLOYMENT_MODE=anonymous` before the backend starts to switch from the single-user desktop runtime to cookie-isolated upload sessions. The browser first calls `/api/session`; the backend issues an opaque HTTP-only cookie, and all listening profiles, analytics, reports, and background-job state are transparently stored under that session namespace. Reusable public music metadata caches remain shared, but one visitor cannot read another visitor's listening profile. Canonical listening-event index keys are session-scoped as well, so two people may import the same event without a database collision.
 
@@ -183,7 +185,15 @@ docker compose up --build
 
 Open `http://localhost:8000` for a local production-container test. See [Hosted deployment](docs/HOSTED_DEPLOYMENT.md) for volume, HTTPS, health-check, privacy, and free-hosting trade-offs.
 
-Phases 1–3 establish isolation, deletion, expiry, resource controls, and a deployable single-instance runtime. Phase 4 will add bounded hosted metadata/LLM adapters; Phase 5 covers observability, responsive acceptance testing, and launch hardening.
+Phases 1-3 establish isolation, deletion, expiry, resource controls, and a deployable single-instance runtime. Phase 4 adds automatic shared-catalogue enrichment, a bounded hosted report-writer adapter, asynchronous progress, and deterministic fallbacks. Phase 5 covers observability, responsive acceptance testing, and launch hardening.
+
+## Phase 4 metadata and report adapters
+
+After a YouTube Takeout or Spotify history import, the web client automatically runs the conservative metadata hierarchy: uploaded provider metadata, reusable exact-match cache, MusicBrainz artist evidence, exact MusicBrainz recording evidence, and Cover Art Archive artwork. Weak title-and-artist-only matches are never written as permanent provider identifiers or reusable artwork records. Version markers and confidence components remain part of the identity gate.
+
+Persona Report generation now runs as a bounded background job with visible progress. A server-only OpenAI-compatible provider may rewrite six prose fields from compact deterministic evidence; it never decides rankings, counts, genres, Musical Age, or personality. The API key is never sent to the browser. Per-session and global request budgets, provider timeout, output cap, concurrent-job cap, strict JSON validation, and a deterministic fallback prevent remote prose from blocking the product.
+
+See [Hosted deployment](docs/HOSTED_DEPLOYMENT.md#phase-4-optional-hosted-report-writer) for configuration and privacy details.
 
 ## Development commands
 
@@ -277,9 +287,9 @@ The comparison lens only makes growth/decline claims when the selected period ha
 
 Persona Report is a continuous five-chapter scroll story: Musical Personality, Your Listening World, Musical Age, Top Artists and Songs, and Final Roast. Desktop uses restrained sticky zoom and lateral transitions while tablet and mobile progressively simplify to normal vertical flow. Reduced-motion mode removes the pans, parallax, and ambient album movement without hiding any content.
 
-All report facts are deterministic. The Music Character registry selects the personality, the Musical Age engine selects the age, and the existing period services provide detected minutes, genre coverage, Top 5 songs, Top 5 artists, and background albums. Gemma only writes the short personality description, Musical Age explanation, and final roast. Invalid, unavailable, or stale model output falls back to deterministic language.
+All report facts are deterministic. The Music Character registry selects the personality, the Musical Age engine selects the age, and the existing period services provide detected minutes, genre coverage, Top 5 songs, Top 5 artists, and background albums. The optional hosted adapter only rewrites the short personality description, Musical Age explanation, and final roast. Invalid, unavailable, stale, or over-budget output falls back to deterministic language.
 
-The report uses one versioned schema and cache fingerprint that includes the music source, rolling-year report period, analytics data, report schema, prompt, Musical Age calculation, personality classifier, and configured Ollama model. Overview deliberately does not duplicate the report journey.
+The report uses one versioned schema and cache fingerprint that includes the music source, selected report period, analytics data, report schema, prompt, Musical Age calculation, personality classifier, and active writer model. Overview deliberately does not duplicate the report journey.
 
 ## Privacy and security
 

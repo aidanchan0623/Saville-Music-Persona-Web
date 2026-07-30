@@ -76,6 +76,18 @@ class Settings:
         self.ollama_base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
         self.ollama_model = os.getenv("OLLAMA_MODEL", "gemma3:4b")
         self.ollama_generate_timeout_seconds = float(os.getenv("OLLAMA_GENERATE_TIMEOUT_SECONDS", "240"))
+        self.hosted_llm_provider = os.getenv("SMP_HOSTED_LLM_PROVIDER", "disabled").strip().casefold()
+        if self.hosted_llm_provider not in {"disabled", "openai-compatible"}:
+            raise ValueError("SMP_HOSTED_LLM_PROVIDER must be disabled or openai-compatible")
+        self.hosted_llm_base_url = os.getenv("SMP_HOSTED_LLM_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+        self.hosted_llm_api_key = os.getenv("SMP_HOSTED_LLM_API_KEY", "").strip()
+        self.hosted_llm_model = os.getenv("SMP_HOSTED_LLM_MODEL", "").strip()
+        self.hosted_llm_timeout_seconds = min(45.0, max(3.0, float(os.getenv("SMP_HOSTED_LLM_TIMEOUT_SECONDS", "20"))))
+        self.hosted_llm_max_output_tokens = min(1200, max(256, int(os.getenv("SMP_HOSTED_LLM_MAX_OUTPUT_TOKENS", "700"))))
+        self.hosted_llm_requests_per_session_hour = max(1, int(os.getenv("SMP_HOSTED_LLM_REQUESTS_PER_SESSION_HOUR", "4")))
+        self.hosted_llm_requests_global_day = max(1, int(os.getenv("SMP_HOSTED_LLM_REQUESTS_GLOBAL_DAY", "200")))
+        self.report_generation_timeout_seconds = min(60, max(10, int(os.getenv("SMP_REPORT_GENERATION_TIMEOUT_SECONDS", "35"))))
+        self.anonymous_max_concurrent_reports = max(1, int(os.getenv("SMP_ANONYMOUS_MAX_CONCURRENT_REPORTS", "2")))
         self.local_timezone = os.getenv("SMP_LOCAL_TIMEZONE", "Asia/Kuala_Lumpur")
         self.duration_enrichment_limit = int(os.getenv("SMP_DURATION_ENRICHMENT_LIMIT", "1000"))
         self.youtube_data_api_key = os.getenv("YOUTUBE_DATA_API_KEY", "").strip()
@@ -122,6 +134,15 @@ class Settings:
         if self.anonymous_mode:
             return min(self.takeout_max_upload_bytes, self.anonymous_max_upload_bytes)
         return self.takeout_max_upload_bytes
+
+    @property
+    def hosted_llm_enabled(self) -> bool:
+        return bool(
+            self.anonymous_mode
+            and self.hosted_llm_provider != "disabled"
+            and self.hosted_llm_api_key
+            and self.hosted_llm_model
+        )
 
     def ensure_local_dirs(self) -> None:
         if not self.anonymous_mode:

@@ -95,7 +95,8 @@ export interface GenreEnrichmentStatus {
   progress: number;
   message: string;
   errorCode: string | null;
-  provider: "musicbrainz";
+  provider: string;
+  source: MusicSource;
   attempted: number | null;
   matched: number | null;
   failed: number | null;
@@ -104,9 +105,36 @@ export interface GenreEnrichmentStatus {
   appliedCached: number | null;
   remainingCandidates: number | null;
   unknownArtistCount: number | null;
+  recordingAttempted: number | null;
+  recordingMatched: number | null;
+  recordingAppliedEventCount: number | null;
+  recordingFailed: number | null;
+  recordingRemainingCandidates: number | null;
+  recordingProviderError: string | null;
+  recordingMetadataAdded: number | null;
   beforeCoverage: number | null;
   afterCoverage: number | null;
   unknownEventCount: number | null;
+}
+
+export type ReportGenerationStage = "queued" | "building" | "writing" | "saving" | "complete" | "failed";
+
+export interface ReportGenerationQueued {
+  jobId: string;
+  status: "queued";
+}
+
+export interface ReportGenerationStatus {
+  jobId: string;
+  status: ReportGenerationStage;
+  progress: number;
+  message: string;
+  errorCode: string | null;
+  provider: string;
+  createdAt: string;
+  updatedAt: string;
+  finishedAt: string | null;
+  report: PersonaReport | null;
 }
 
 export interface SpotifyStatus {
@@ -805,7 +833,7 @@ export interface PersonaReportPersonality {
   roastDescription: string;
   confidence: number;
   habits: string[];
-  generationSource: "gemma" | "cache-gemma" | "fallback";
+  generationSource: "gemma" | "cache-gemma" | "hosted-llm" | "cache-hosted-llm" | "fallback";
 }
 
 export interface PersonaGenre {
@@ -868,7 +896,7 @@ export interface PersonaReportSummary {
   headline: string;
   body: string;
   finalLine: string;
-  generationSource: "gemma" | "cache-gemma" | "fallback";
+  generationSource: "gemma" | "cache-gemma" | "hosted-llm" | "cache-hosted-llm" | "fallback";
 }
 
 export interface PersonaBackgroundAlbum {
@@ -880,7 +908,7 @@ export interface PersonaBackgroundAlbum {
 }
 
 export interface PersonaGeneration {
-  source: "gemma" | "cache-gemma" | "fallback";
+  source: "gemma" | "cache-gemma" | "hosted-llm" | "cache-hosted-llm" | "fallback";
   model: string;
   promptVersion: number;
   generatedAt: string;

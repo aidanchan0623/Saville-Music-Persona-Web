@@ -14,7 +14,7 @@ from app.session import generate_session_id, reset_current_session, set_current_
 
 app = FastAPI(
     title="Saville Music Persona Web API",
-    version="0.3.0",
+    version="0.4.0",
     description="Anonymous hosted music-history analysis for Google Takeout and Spotify exports.",
 )
 logger = logging.getLogger("saville.session_cleanup")

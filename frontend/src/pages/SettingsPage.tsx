@@ -97,8 +97,12 @@ export function SettingsPage({
         <SettingsCard>
           <p className="text-xs font-semibold uppercase tracking-[0.18em] text-red-200">Analysis</p>
           <h2 className="mt-2 text-2xl font-black text-white">Metadata coverage</h2>
-          <p className="mt-2 max-w-3xl text-sm leading-6 text-mist">Saville can improve unresolved genres using its shared public music metadata cache without exposing another listener's history.</p>
-          <button className="btn-secondary mt-5" type="button" disabled={busy || !auth?.cached_data_available} onClick={onImproveGenres}><RefreshCw size={16} /> Improve genre coverage</button>
+          <p className="mt-2 max-w-3xl text-sm leading-6 text-mist">Saville can improve unresolved genres, release years, albums, and artwork through its shared public MusicBrainz and Cover Art Archive catalogue without exposing another listener's history.</p>
+          <div className="mt-4 grid gap-3 md:grid-cols-2">
+            <Info label="Report writer" value={prerequisites?.items.find((item) => item.name === "Hosted report writer")?.detail || "Deterministic writer ready"} />
+            <Info label="Fallback" value="Deterministic and always available" />
+          </div>
+          <button className="btn-secondary mt-5" type="button" disabled={busy || (!auth?.cached_data_available && !spotifyStatus?.historical_data_available)} onClick={onImproveGenres}><RefreshCw size={16} /> Improve metadata coverage</button>
         </SettingsCard>
 
         <SettingsCard>

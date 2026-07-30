@@ -9,6 +9,7 @@ from typing import Any, Callable
 import httpx
 
 from app.analysis.taste_model import has_usable_artist, primary_genre_for_profile, profile_for_artist, source_genres_for_artist
+from app.analysis.track_metadata import cache_track_metadata, display_recording_title, version_signature
 from app.data.genre_taxonomy import normalise_external_genres
 from app.database.recording_catalog import RecordingCatalog, base_title, modifiers_for, normalise_recording_text
 from app.services.genre_enrichment_service import MUSICBRAINZ_API_URL, lucene_phrase
@@ -32,11 +33,12 @@ class MusicBrainzRecordingGenreService:
         *,
         limit: int,
         deadline: float,
+        metadata_cache: dict[str, Any] | None = None,
         on_update: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
         catalog.sync_normalised(normalised)
         candidates = unresolved_track_play_counts(normalised, catalog)
-        attempted = matched = applied = failed = 0
+        attempted = matched = applied = failed = metadata_added = 0
         provider_error: str | None = None
         with httpx.Client(timeout=self.timeout_seconds) as client:
             for track, plays in candidates[: max(0, limit)]:
@@ -57,26 +59,60 @@ class MusicBrainzRecordingGenreService:
                     failed += 1
                     catalog.record_failure(lookup_key, recording_id or None, "musicbrainz", "not_found_or_ambiguous", retry_after())
                     continue
-                catalog.add_identifier(recording_id, "musicbrainz_recording_id", result["providerRecordingId"], result["identityConfidence"])
-                for isrc in result["isrcs"]:
-                    catalog.add_identifier(recording_id, "isrc", isrc, result["identityConfidence"])
-                catalog.save_evidence(
-                    recording_id,
-                    provider="musicbrainz",
-                    provider_recording_id=result["providerRecordingId"],
-                    raw_genres=result["rawGenres"],
-                    identity_confidence=result["identityConfidence"],
-                    evidence_confidence=result["evidenceConfidence"],
-                )
-                assignment = catalog.save_assignment(
-                    recording_id,
-                    primary_genre=result["primaryGenre"],
-                    secondary_genres=result["secondaryGenres"],
-                    identity_confidence=result["identityConfidence"],
-                    evidence_confidence=result["evidenceConfidence"],
-                    normalisation_confidence=result["normalisationConfidence"],
-                    source_summary=["musicbrainz_recording"],
-                )
+                if result["identityConfidence"] >= 0.85:
+                    catalog.add_identifier(recording_id, "musicbrainz_recording_id", result["providerRecordingId"], result["identityConfidence"])
+                    for isrc in result["isrcs"]:
+                        catalog.add_identifier(recording_id, "isrc", isrc, result["identityConfidence"])
+                assignment: dict[str, Any] = {}
+                if result.get("primaryGenre"):
+                    catalog.save_evidence(
+                        recording_id,
+                        provider="musicbrainz",
+                        provider_recording_id=result["providerRecordingId"],
+                        raw_genres=result["rawGenres"],
+                        identity_confidence=result["identityConfidence"],
+                        evidence_confidence=result["evidenceConfidence"],
+                    )
+                    assignment = catalog.save_assignment(
+                        recording_id,
+                        primary_genre=result["primaryGenre"],
+                        secondary_genres=result["secondaryGenres"],
+                        identity_confidence=result["identityConfidence"],
+                        evidence_confidence=result["evidenceConfidence"],
+                        normalisation_confidence=result["normalisationConfidence"],
+                        source_summary=["musicbrainz_recording"],
+                    )
+                if metadata_cache is not None and result["identityConfidence"] >= 0.85 and any(
+                    result.get(field) for field in ("album", "releaseYear", "coverArtUrl")
+                ):
+                    cache_track_metadata(
+                        metadata_cache,
+                        {
+                            "status": "resolved",
+                            "title": display_recording_title(track.get("title"), track.get("primary_artist")),
+                            "primary_artist": track.get("primary_artist"),
+                            "artists": [
+                                str(value).strip()
+                                for value in (track.get("artists") or [track.get("primary_artist")])
+                                if str(value or "").strip()
+                            ],
+                            "album": result.get("album"),
+                            "album_id": result.get("releaseGroupId"),
+                            "album_art_url": result.get("coverArtUrl"),
+                            "album_art_source": "cover_art_archive" if result.get("coverArtUrl") else None,
+                            "original_release_year": result.get("releaseYear"),
+                            "album_release_year": result.get("releaseYear"),
+                            "identity_confidence": result["identityConfidence"],
+                            "match_confidence": result["identityConfidence"],
+                            "release_year_confidence": "high",
+                            "match_method": "exact_musicbrainz_recording",
+                            "source": "musicbrainz.recording",
+                            "version_signature": list(version_signature(track.get("title"))),
+                            "musicbrainz_recording_id": result["providerRecordingId"],
+                        },
+                        video_id=track.get("video_id"),
+                    )
+                    metadata_added += 1
                 matched += 1
                 if assignment.get("autoApplied"):
                     applied += plays
@@ -90,6 +126,7 @@ class MusicBrainzRecordingGenreService:
             "recordingFailed": failed,
             "recordingRemainingCandidates": max(0, len(candidates) - attempted),
             "recordingProviderError": provider_error,
+            "recordingMetadataAdded": metadata_added,
         }
 
     def resolve_recording(self, client: httpx.Client, track: dict[str, Any], deadline: float) -> dict[str, Any] | None:
@@ -113,26 +150,57 @@ class MusicBrainzRecordingGenreService:
         detail = self._get_json(
             client,
             f"{MUSICBRAINZ_API_URL}/recording/{recording_id}",
-            {"inc": "genres+tags+isrcs", "fmt": "json"},
+            {"inc": "genres+tags+isrcs+releases+release-groups", "fmt": "json"},
             deadline,
         )
         genres = _ordered_labels(detail.get("genres"))
         tags = _ordered_labels(detail.get("tags"))
         raw_genres = list(dict.fromkeys([*genres, *tags]))
         taxonomy = normalise_external_genres(raw_genres)
-        if not taxonomy:
+        release_metadata = _release_metadata(detail.get("releases"))
+        cover_art_url = self._cover_art_url(client, release_metadata.get("releaseGroupId"), deadline)
+        if not taxonomy and not release_metadata:
             return None
         evidence_confidence = 0.92 if genres else 0.82 if tags else 0.0
         return {
             "providerRecordingId": recording_id,
             "isrcs": [str(value).strip() for value in detail.get("isrcs") or [] if str(value).strip()],
             "rawGenres": raw_genres,
-            "primaryGenre": taxonomy.primary_genre,
-            "secondaryGenres": list(taxonomy.secondary_genres),
+            "primaryGenre": taxonomy.primary_genre if taxonomy else None,
+            "secondaryGenres": list(taxonomy.secondary_genres) if taxonomy else [],
             "identityConfidence": identity_confidence,
             "evidenceConfidence": evidence_confidence,
-            "normalisationConfidence": taxonomy.normalisation_confidence,
+            "normalisationConfidence": taxonomy.normalisation_confidence if taxonomy else 0.0,
+            **release_metadata,
+            "coverArtUrl": cover_art_url,
         }
+
+    def _cover_art_url(self, client: httpx.Client, release_group_id: Any, deadline: float) -> str | None:
+        value = str(release_group_id or "").strip()
+        if not value:
+            return None
+        self._check_deadline(deadline)
+        try:
+            response = client.get(
+                f"https://coverartarchive.org/release-group/{value}",
+                headers={"User-Agent": "SavilleMusicPersona/0.4 (https://github.com/aidanchan0623/Saville-Music-Persona-Web)"},
+            )
+            self._last_request_at = time.monotonic()
+            if response.status_code == 404:
+                return None
+            response.raise_for_status()
+            payload = response.json()
+        except (httpx.HTTPError, ValueError):
+            return None
+        images = payload.get("images") if isinstance(payload, dict) else None
+        if not isinstance(images, list):
+            return None
+        preferred = next((item for item in images if isinstance(item, dict) and item.get("front")), None)
+        selected = preferred or next((item for item in images if isinstance(item, dict)), None)
+        if not isinstance(selected, dict):
+            return None
+        thumbnails = selected.get("thumbnails") if isinstance(selected.get("thumbnails"), dict) else {}
+        return str(thumbnails.get("500") or thumbnails.get("large") or selected.get("image") or "").strip() or None
 
     def _get_json(self, client: httpx.Client, url: str, params: dict[str, Any], deadline: float) -> dict[str, Any]:
         response: httpx.Response | None = None
@@ -141,7 +209,7 @@ class MusicBrainzRecordingGenreService:
             response = client.get(
                 url,
                 params=params,
-                headers={"User-Agent": "SavilleMusicPersona/0.1 (https://github.com/aidanchan0623/Saville-Music-Persona)"},
+                headers={"User-Agent": "SavilleMusicPersona/0.4 (https://github.com/aidanchan0623/Saville-Music-Persona-Web)"},
             )
             self._last_request_at = time.monotonic()
             if response.status_code not in {429, 503} or attempt == 2:
@@ -168,6 +236,33 @@ class MusicBrainzRecordingGenreService:
     def _check_deadline(deadline: float) -> None:
         if time.monotonic() > deadline:
             raise TimeoutError
+
+
+def _release_metadata(value: Any) -> dict[str, Any]:
+    if not isinstance(value, list):
+        return {}
+    candidates: list[tuple[int, int, dict[str, Any]]] = []
+    for row in value:
+        if not isinstance(row, dict):
+            continue
+        date_value = str(row.get("date") or "")
+        match = next((part for part in date_value.split("-") if len(part) == 4 and part.isdigit()), None)
+        year = int(match) if match else 0
+        if year < 1900 or year > datetime.now(timezone.utc).year + 1:
+            continue
+        release_group = row.get("release-group") if isinstance(row.get("release-group"), dict) else {}
+        primary_type = str(release_group.get("primary-type") or "").casefold()
+        type_rank = {"album": 0, "single": 1, "ep": 2}.get(primary_type, 3)
+        candidates.append((year, type_rank, row))
+    if not candidates:
+        return {}
+    _, _, selected = min(candidates, key=lambda item: (item[0], item[1]))
+    release_group = selected.get("release-group") if isinstance(selected.get("release-group"), dict) else {}
+    return {
+        "releaseYear": min(item[0] for item in candidates),
+        "album": str(selected.get("title") or release_group.get("title") or "").strip() or None,
+        "releaseGroupId": str(release_group.get("id") or "").strip() or None,
+    }
 
 
 def unresolved_track_play_counts(normalised: dict[str, Any], catalog: RecordingCatalog) -> list[tuple[dict[str, Any], int]]:

@@ -9,7 +9,7 @@ from app.analysis.taste_model import source_genres_for_artist
 from app.data.artist_genres import clusters_for_genres
 from app.data.genre_taxonomy import INTERNAL_GENRES, normalise_external_genres
 from app.database.recording_catalog import RecordingCatalog
-from app.services.recording_genre_service import exact_recording_candidates
+from app.services.recording_genre_service import _release_metadata, exact_recording_candidates
 
 
 def history_item(video_id: str, title: str, played: str, *, duration: int = 240, album: str | None = "Album") -> dict:
@@ -105,6 +105,17 @@ def test_title_and_artist_alone_do_not_create_permanent_recording(tmp_path) -> N
 
     assert catalog.resolve_track(weak) is None
     assert catalog.summary()["recordings"] == 0
+
+
+def test_release_metadata_prefers_the_earliest_valid_release_group() -> None:
+    result = _release_metadata(
+        [
+            {"title": "Later Album", "date": "2011-04-02", "release-group": {"id": "later", "primary-type": "Album"}},
+            {"title": "Original Single", "date": "2007-09-01", "release-group": {"id": "original", "primary-type": "Single"}},
+        ]
+    )
+
+    assert result == {"releaseYear": 2007, "album": "Original Single", "releaseGroupId": "original"}
 
 
 def test_confidence_components_remain_inspectable_and_gate_application(tmp_path) -> None:
