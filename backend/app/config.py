@@ -64,6 +64,15 @@ class Settings:
         self.data_dir = Path(os.getenv("SMP_DATA_DIR", self.project_root / "data"))
         self.raw_dir = self.data_dir / "raw"
         self.db_path = Path(os.getenv("SMP_DB_PATH", self.data_dir / "saville_music_persona.db"))
+        self.serve_frontend = os.getenv(
+            "SMP_SERVE_FRONTEND",
+            "true" if self.anonymous_mode else "false",
+        ).strip().casefold() in {"1", "true", "yes", "on"}
+        self.frontend_dist_dir = Path(
+            os.getenv("SMP_FRONTEND_DIST_DIR", self.project_root / "frontend" / "dist")
+        )
+        if not self.frontend_dist_dir.is_absolute():
+            self.frontend_dist_dir = self.project_root / self.frontend_dist_dir
         self.ollama_base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
         self.ollama_model = os.getenv("OLLAMA_MODEL", "gemma3:4b")
         self.ollama_generate_timeout_seconds = float(os.getenv("OLLAMA_GENERATE_TIMEOUT_SECONDS", "240"))

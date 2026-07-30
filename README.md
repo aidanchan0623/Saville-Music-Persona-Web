@@ -173,7 +173,17 @@ SMP_FRONTEND_URL=https://your-frontend.example
 
 Use `SMP_SESSION_COOKIE_SECURE=false` only for plain-HTTP localhost testing. When frontend and API use different sites, set `SMP_SESSION_COOKIE_SAMESITE=none`, configure the exact frontend origin rather than `*`, and keep credentialed requests enabled.
 
-Phases 1–2 establish isolation, deletion, expiry, and basic resource controls. Production deployment still needs Phase 3 infrastructure (durable hosted storage and worker topology), Phase 4 hosted metadata/LLM adapters, and Phase 5 observability, responsive acceptance testing, and launch hardening.
+## Phase 3 production runtime
+
+The Web repository now builds as one production container that serves the React dashboard and FastAPI from the same origin. SQLite uses WAL mode on a configurable persistent volume, readiness checks verify storage and frontend availability, and the hosted launcher enforces exactly one application process so in-process import workers cannot race across replicas. GitHub Actions tests the complete project, smoke-tests the image, and publishes successful `main` images to GitHub Container Registry.
+
+```powershell
+docker compose up --build
+```
+
+Open `http://localhost:8000` for a local production-container test. See [Hosted deployment](docs/HOSTED_DEPLOYMENT.md) for volume, HTTPS, health-check, privacy, and free-hosting trade-offs.
+
+Phases 1–3 establish isolation, deletion, expiry, resource controls, and a deployable single-instance runtime. Phase 4 will add bounded hosted metadata/LLM adapters; Phase 5 covers observability, responsive acceptance testing, and launch hardening.
 
 ## Development commands
 

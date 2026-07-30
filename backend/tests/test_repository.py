@@ -28,6 +28,13 @@ def test_cached_json_reuses_parsed_value_until_version_changes(tmp_path: Path) -
     assert refreshed is not first
 
 
+def test_repository_uses_wal_and_reports_writable_storage(tmp_path: Path) -> None:
+    repository = JsonRepository(tmp_path / "hosted.db")
+    assert repository.healthcheck() is True
+    with repository.connect() as conn:
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0].casefold() == "wal"
+
+
 def test_cached_json_tracks_batch_writes_and_deletes(tmp_path: Path) -> None:
     repository = JsonRepository(tmp_path / "batch.db")
     repository.save_json_batch({"normalised": {"version": 1}, "analysis": {"version": 1}})

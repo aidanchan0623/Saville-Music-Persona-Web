@@ -738,9 +738,31 @@ def quick_youtube_auth_status() -> dict[str, Any]:
 def health() -> dict[str, Any]:
     return {
         "ok": True,
-        "app": "Saville Music Persona",
+        "app": "Saville Music Persona Web",
+        "version": "0.3.0",
         "mode": settings.deployment_mode,
         "time": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@router.get("/ready")
+def readiness() -> dict[str, Any]:
+    database_ready = repo.healthcheck()
+    frontend_ready = not settings.serve_frontend or (settings.frontend_dist_dir / "index.html").is_file()
+    if not database_ready or not frontend_ready:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "Hosted runtime is not ready",
+                "detail": "Persistent storage or the compiled frontend is unavailable.",
+                "code": "runtime_not_ready",
+            },
+        )
+    return {
+        "ok": True,
+        "database": "writable",
+        "frontend": "bundled" if settings.serve_frontend else "external",
+        "workerTopology": "single-process",
     }
 
 

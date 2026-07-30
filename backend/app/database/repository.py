@@ -25,12 +25,15 @@ class JsonRepository:
         self.initialise()
 
     def connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=30)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout = 30000")
         return conn
 
     def initialise(self) -> None:
         with self.connect() as conn:
+            conn.execute("PRAGMA journal_mode = WAL")
+            conn.execute("PRAGMA synchronous = NORMAL")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS json_cache (
@@ -239,6 +242,22 @@ class JsonRepository:
         elapsed = max(0, int((current - window_start).total_seconds()))
         retry_after = max(1, window_seconds - elapsed)
         return allowed, max(0, limit - count), retry_after
+
+    def healthcheck(self) -> bool:
+        """Verify that the configured persistent database can be read and written."""
+        marker = datetime.now(timezone.utc).isoformat()
+        try:
+            with self.connect() as conn:
+                conn.execute("CREATE TABLE IF NOT EXISTS runtime_health (id INTEGER PRIMARY KEY, checked_at TEXT NOT NULL)")
+                conn.execute(
+                    "INSERT INTO runtime_health(id, checked_at) VALUES (1, ?) "
+                    "ON CONFLICT(id) DO UPDATE SET checked_at=excluded.checked_at",
+                    (marker,),
+                )
+                row = conn.execute("SELECT checked_at FROM runtime_health WHERE id = 1").fetchone()
+            return bool(row and row["checked_at"] == marker)
+        except sqlite3.Error:
+            return False
 
     def updated_at_for_storage_key(self, storage_key: str) -> datetime | None:
         with self.connect() as conn:

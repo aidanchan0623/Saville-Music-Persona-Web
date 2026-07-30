@@ -1,0 +1,27 @@
+services:
+  saville-web:
+    build:
+      context: .
+    image: saville-music-persona-web:local
+    restart: unless-stopped
+    init: true
+    ports:
+      - "8000:8000"
+    environment:
+      PORT: "8000"
+      SMP_DEPLOYMENT_MODE: anonymous
+      SMP_SERVE_FRONTEND: "true"
+      SMP_DATA_DIR: /var/lib/saville
+      SMP_SESSION_COOKIE_SECURE: "false"
+      SMP_SESSION_COOKIE_SAMESITE: lax
+      SMP_SESSION_TTL_HOURS: "24"
+      SMP_ANONYMOUS_MAX_UPLOAD_BYTES: "104857600"
+      SMP_ANONYMOUS_MAX_EVENTS: "250000"
+      SMP_ANONYMOUS_UPLOADS_PER_HOUR: "4"
+      SMP_ANONYMOUS_MAX_CONCURRENT_IMPORTS: "2"
+      WEB_CONCURRENCY: "1"
+    volumes:
+      - saville-data:/var/lib/saville
+
+volumes:
+  saville-data:

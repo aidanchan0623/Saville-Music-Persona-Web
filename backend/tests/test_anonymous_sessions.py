@@ -47,9 +47,26 @@ def test_anonymous_middleware_issues_isolated_http_only_sessions(tmp_path: Path,
     assert first.cookies.get(routes.settings.session_cookie_name) != second.cookies.get(routes.settings.session_cookie_name)
     assert first.post("/api/auth/setup").status_code == 403
     assert first.post("/api/auth/setup", headers={"Origin": "https://untrusted.example"}).json()["code"] == "origin_not_allowed"
+    monkeypatch.setattr(routes.settings, "serve_frontend", True)
+    assert first.post("/api/auth/setup", headers={"Origin": "http://testserver"}).json()["detail"]["code"] == "account_connections_disabled"
     assert first.get("/api/spotify/login", follow_redirects=False).status_code == 403
     assert first.get("/api/auth/status").json()["auth_file_path"] == ""
     assert first.get("/api/session").json()["expiresAt"] == first_status.json()["expiresAt"]
+
+
+def test_health_probes_do_not_create_visitor_sessions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repository = anonymous_repository(tmp_path / "health.db")
+    monkeypatch.setattr(routes, "repo", repository)
+    monkeypatch.setattr(routes.settings, "deployment_mode", "anonymous")
+    monkeypatch.setattr(routes.settings, "serve_frontend", False)
+    client = TestClient(app)
+    health = client.get("/api/health")
+    ready = client.get("/api/ready")
+    assert health.status_code == 200
+    assert health.json()["version"] == "0.3.0"
+    assert ready.status_code == 200
+    assert ready.json()["workerTopology"] == "single-process"
+    assert client.cookies.get(routes.settings.session_cookie_name) is None
 
 
 def test_import_worker_keeps_the_request_session_context(tmp_path: Path) -> None:

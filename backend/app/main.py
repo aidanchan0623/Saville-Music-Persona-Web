@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 from app.api import routes
 from app.config import settings
@@ -13,9 +13,9 @@ from app.session import generate_session_id, reset_current_session, set_current_
 
 
 app = FastAPI(
-    title="Saville Music Persona API",
-    version="0.1.0",
-    description="Local-first YouTube Music taste analysis powered by ytmusicapi and Ollama.",
+    title="Saville Music Persona Web API",
+    version="0.3.0",
+    description="Anonymous hosted music-history analysis for Google Takeout and Spotify exports.",
 )
 logger = logging.getLogger("saville.session_cleanup")
 
@@ -31,10 +31,19 @@ app.add_middleware(
 @app.middleware("http")
 async def anonymous_session_boundary(request: Request, call_next):
     """Issue one opaque browser session before any user-owned cache is read."""
-    if not settings.anonymous_mode:
+    is_api_request = request.url.path == "/api" or request.url.path.startswith("/api/")
+    if not settings.anonymous_mode or not is_api_request:
+        return await call_next(request)
+    if request.url.path in {"/api/health", "/api/ready"}:
         return await call_next(request)
     origin = request.headers.get("origin")
-    if request.method not in {"GET", "HEAD", "OPTIONS"} and origin and origin not in settings.cors_origins:
+    same_origin = bool(origin and origin.rstrip("/") == str(request.base_url).rstrip("/"))
+    if (
+        request.method not in {"GET", "HEAD", "OPTIONS"}
+        and origin
+        and origin not in settings.cors_origins
+        and not (settings.serve_frontend and same_origin)
+    ):
         return JSONResponse(
             status_code=403,
             content={
@@ -75,13 +84,28 @@ async def anonymous_session_boundary(request: Request, call_next):
 app.include_router(routes.router)
 
 
+if settings.serve_frontend and (settings.frontend_dist_dir / "index.html").is_file():
+    frontend_root = settings.frontend_dist_dir.resolve()
+
+    @app.get("/{full_path:path}", include_in_schema=False, response_model=None)
+    def hosted_frontend(full_path: str):
+        if full_path == "api" or full_path.startswith("api/"):
+            return JSONResponse(status_code=404, content={"detail": "Not Found"})
+        requested = (frontend_root / full_path).resolve()
+        if requested.is_file() and (requested == frontend_root or frontend_root in requested.parents):
+            cache_control = "public, max-age=31536000, immutable" if full_path.startswith("assets/") else "no-cache"
+            return FileResponse(requested, headers={"Cache-Control": cache_control})
+        return FileResponse(frontend_root / "index.html", headers={"Cache-Control": "no-cache"})
+
+
 @app.exception_handler(Exception)
 async def unhandled_exception(_: Request, exc: Exception) -> JSONResponse:
+    logger.error("Unhandled request failure", exc_info=(type(exc), exc, exc.__traceback__))
     return JSONResponse(
         status_code=500,
         content={
-            "error": "Unexpected local server error",
-            "detail": str(exc),
+            "error": "Unexpected server error",
+            "detail": "The request could not be completed." if settings.anonymous_mode else str(exc),
             "code": "internal_error",
         },
     )
