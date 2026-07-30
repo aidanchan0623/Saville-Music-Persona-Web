@@ -526,6 +526,21 @@ export default function App() {
     }
   };
 
+  const deleteAnonymousSession = async () => {
+    if (!runtime?.anonymous) return;
+    const confirmed = window.confirm("Permanently delete this session's uploaded listening data and reports?");
+    if (!confirmed) return;
+    setBusy(true);
+    setMessage("Deleting this private session...");
+    try {
+      await api.deleteSession();
+      window.location.reload();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "This session could not be deleted.");
+      setBusy(false);
+    }
+  };
+
   const activePage = useMemo(() => {
     const titleAnimationKey = `${page}:${titleVisitId}`;
     switch (page) {
@@ -579,6 +594,7 @@ export default function App() {
             canRetrySpotifyHistory={canRetrySpotifyHistory}
             onRetrySpotifyHistory={retrySpotifyHistory}
             onViewOverview={() => navigate("overview")}
+            onDeleteSession={deleteAnonymousSession}
             spotifyStatus={spotifyStatus}
             onConnectSpotify={connectSpotify}
             onRefreshSpotify={refreshSpotify}

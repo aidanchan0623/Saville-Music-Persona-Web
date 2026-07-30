@@ -32,11 +32,35 @@ class TakeoutImportAlreadyRunning(RuntimeError):
     pass
 
 
+class TakeoutImportCapacityReached(RuntimeError):
+    pass
+
+
 class TakeoutImportTimedOut(TimeoutError):
     pass
 
 
 Processor = Callable[[str, Path, "TakeoutImportCoordinator", float], None]
+
+
+class ImportCapacity:
+    """A process-wide cap shared by all anonymous import types."""
+
+    def __init__(self, maximum: int) -> None:
+        self.maximum = max(1, maximum)
+        self._lock = threading.Lock()
+        self._jobs: set[str] = set()
+
+    def acquire(self, job_id: str) -> bool:
+        with self._lock:
+            if len(self._jobs) >= self.maximum:
+                return False
+            self._jobs.add(job_id)
+            return True
+
+    def release(self, job_id: str) -> None:
+        with self._lock:
+            self._jobs.discard(job_id)
 
 
 class TakeoutImportCoordinator:
@@ -47,11 +71,13 @@ class TakeoutImportCoordinator:
         *,
         job_prefix: str = JOB_PREFIX,
         source_label: str = "Takeout",
+        capacity: ImportCapacity | None = None,
     ) -> None:
         self.repo = repo
         self.timeout_seconds = timeout_seconds
         self.job_prefix = job_prefix
         self.source_label = source_label
+        self.capacity = capacity
         self._state_lock = threading.Lock()
         self._active_jobs: dict[str, str] = {}
         self._logger = logging.getLogger(f"saville.{source_label.casefold().replace(' ', '_')}_import")
@@ -79,6 +105,8 @@ class TakeoutImportCoordinator:
             if scope in self._active_jobs:
                 raise TakeoutImportAlreadyRunning(f"Another {self.source_label} import is already running.")
             job_id = uuid.uuid4().hex
+            if self.capacity and not self.capacity.acquire(job_id):
+                raise TakeoutImportCapacityReached("The hosted importer is at capacity. Try again in a few minutes.")
             self._active_jobs[scope] = job_id
         self.log(job_id, "upload_received", fileType=file_type)
         return job_id
@@ -88,6 +116,12 @@ class TakeoutImportCoordinator:
         with self._state_lock:
             if self._active_jobs.get(scope) == job_id:
                 self._active_jobs.pop(scope, None)
+        if self.capacity:
+            self.capacity.release(job_id)
+
+    def active_for_scope(self, scope: str) -> bool:
+        with self._state_lock:
+            return scope in self._active_jobs
 
     def queue(self, job_id: str, path: Path, file_size: int, processor: Processor) -> dict[str, Any]:
         job = {

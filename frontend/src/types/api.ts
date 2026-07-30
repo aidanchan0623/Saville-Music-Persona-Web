@@ -8,6 +8,12 @@ export interface SessionStatus {
   accountConnectionsEnabled: boolean;
 }
 
+export interface SessionDeleteResult {
+  deleted: boolean;
+  cacheRowsDeleted: number;
+  listeningEventsDeleted: number;
+}
+
 export type AnalyticsContractStatus = "complete" | "partial" | "insufficient_data" | "stale_import" | "processing" | "failed";
 
 export interface AnalyticsContractWarning {

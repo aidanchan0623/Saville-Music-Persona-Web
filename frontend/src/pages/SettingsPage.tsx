@@ -28,6 +28,7 @@ interface Props {
   canRetrySpotifyHistory: boolean;
   onRetrySpotifyHistory: () => void;
   onViewOverview: () => void;
+  onDeleteSession: () => void;
   titleAnimationKey: string;
 }
 
@@ -52,6 +53,7 @@ export function SettingsPage({
   canRetrySpotifyHistory,
   onRetrySpotifyHistory,
   onViewOverview,
+  onDeleteSession,
   titleAnimationKey,
 }: Props) {
   const [sourceModalOpen, setSourceModalOpen] = useState(false);
@@ -97,6 +99,17 @@ export function SettingsPage({
           <h2 className="mt-2 text-2xl font-black text-white">Metadata coverage</h2>
           <p className="mt-2 max-w-3xl text-sm leading-6 text-mist">Saville can improve unresolved genres using its shared public music metadata cache without exposing another listener's history.</p>
           <button className="btn-secondary mt-5" type="button" disabled={busy || !auth?.cached_data_available} onClick={onImproveGenres}><RefreshCw size={16} /> Improve genre coverage</button>
+        </SettingsCard>
+
+        <SettingsCard>
+          <p className="text-xs font-semibold uppercase tracking-[0.18em] text-red-200">Privacy control</p>
+          <h2 className="mt-2 text-2xl font-black text-white">Delete this session</h2>
+          <p className="mt-2 max-w-3xl text-sm leading-6 text-mist">
+            Permanently removes this browser session's uploads, analysis, reports, and derived listening-event index now. Shared public music metadata is retained because it contains no listening history.
+          </p>
+          <button className="btn-secondary mt-5 border-red-500/40 text-red-100" type="button" disabled={busy} onClick={onDeleteSession}>
+            Delete my uploaded data
+          </button>
         </SettingsCard>
 
         <MusicSourceModal open={sourceModalOpen} onClose={() => setSourceModalOpen(false)} onConnectSpotify={onConnectSpotify} onImportTakeout={onImportTakeout} onImportSpotifyHistory={onImportSpotifyHistory} busy={busy} message={message} spotifyConfigured={false} accountConnectionsEnabled={false} />

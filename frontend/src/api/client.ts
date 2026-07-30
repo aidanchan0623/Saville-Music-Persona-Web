@@ -19,6 +19,7 @@ import type {
   RefreshQueued,
   RefreshStatus,
   SessionStatus,
+  SessionDeleteResult,
   SpotifyStatus,
   TasteDnaComparison,
   TasteDnaExplorer,
@@ -78,6 +79,7 @@ function requireOverviewSchema(value: OverviewResponse) {
 export const api = {
   health: () => request<{ ok: boolean }>("/health"),
   sessionStatus: () => request<SessionStatus>("/session"),
+  deleteSession: () => request<SessionDeleteResult>("/session", { method: "DELETE" }),
   prerequisites: () => request<Prerequisites>("/prerequisites"),
   authStatus: (live = false) => request<AuthStatus>(`/auth/status${live ? "?live=true" : ""}`),
   authSetup: () => request<Record<string, unknown>>("/auth/setup", { method: "POST", body: "{}" }),

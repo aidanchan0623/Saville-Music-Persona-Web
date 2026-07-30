@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, File, HTTPException, Query, Response, UploadFile
 from fastapi.responses import RedirectResponse
 
 from app.analysis.duration import annotate_normalised_durations
@@ -65,6 +65,7 @@ from app.schemas.responses import (
     DurationEnrichmentStatusResponse,
     GenreEnrichmentStatusResponse,
     ReportRequest,
+    SessionDeleteResponse,
     SessionStatusResponse,
     TakeoutImportQueuedResponse,
     TakeoutImportStatusResponse,
@@ -104,10 +105,13 @@ from app.services.spotify_history_service import (
     parse_spotify_history_file,
 )
 from app.services.takeout_import_jobs import (
+    ImportCapacity,
     TakeoutImportAlreadyRunning,
+    TakeoutImportCapacityReached,
     TakeoutImportCoordinator,
     TakeoutImportTimedOut,
 )
+from app.services.session_cleanup import SessionCleanupService
 from app.services.takeout_service import (
     TAKEOUT_PARSER_SCHEMA_VERSION,
     TakeoutParseError,
@@ -126,18 +130,61 @@ repo = JsonRepository(
 ytmusic = YTMusicService(settings)
 ollama = OllamaService(settings)
 spotify = SpotifyService(settings)
-takeout_imports = TakeoutImportCoordinator(repo, settings.takeout_import_timeout_seconds)
+import_capacity = ImportCapacity(settings.anonymous_max_concurrent_imports) if settings.anonymous_mode else None
+takeout_imports = TakeoutImportCoordinator(
+    repo,
+    settings.takeout_import_timeout_seconds,
+    capacity=import_capacity,
+)
 spotify_history_imports = TakeoutImportCoordinator(
     repo,
     settings.takeout_import_timeout_seconds,
     job_prefix="spotify_history_import_job:",
     source_label="Spotify history",
+    capacity=import_capacity,
 )
 duration_enrichment = DurationEnrichmentCoordinator(repo, settings.duration_enrichment_timeout_seconds)
 genre_enrichment_service = MusicBrainzGenreService()
 recording_genre_enrichment_service = MusicBrainzRecordingGenreService()
 genre_enrichment = GenreEnrichmentCoordinator(repo, settings.genre_enrichment_timeout_seconds)
 refresh_jobs = RefreshCoordinator(repo, settings.refresh_timeout_seconds)
+session_cleanup = SessionCleanupService(
+    repo,
+    interval_seconds=settings.session_cleanup_interval_seconds,
+    upload_ttl_hours=settings.session_ttl_hours,
+)
+
+
+def current_session_cleanup() -> SessionCleanupService:
+    """Follow a monkeypatched repository in tests while reusing the production service."""
+    global session_cleanup
+    if session_cleanup.repo is not repo:
+        session_cleanup = SessionCleanupService(
+            repo,
+            interval_seconds=settings.session_cleanup_interval_seconds,
+            upload_ttl_hours=settings.session_ttl_hours,
+        )
+    return session_cleanup
+
+
+def enforce_anonymous_upload_limit() -> None:
+    if not settings.anonymous_mode:
+        return
+    allowed, _, retry_after = repo.consume_rate_limit(
+        "usage:history_upload",
+        limit=settings.anonymous_uploads_per_hour,
+        window_seconds=60 * 60,
+    )
+    if not allowed:
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": "Upload limit reached",
+                "detail": "This private session has reached its hourly upload limit. Try again later.",
+                "code": "anonymous_upload_rate_limited",
+            },
+            headers={"Retry-After": str(retry_after)},
+        )
 
 
 def current_recording_catalog() -> RecordingCatalog:
@@ -711,7 +758,13 @@ def session_status() -> SessionStatusResponse:
     now = datetime.now(timezone.utc)
     existing = repo.load_json("session_meta")
     created_at = existing.get("createdAt") if isinstance(existing, dict) else now.isoformat()
-    expires_at = now + timedelta(hours=settings.session_ttl_hours)
+    stored_expiry = existing.get("expiresAt") if isinstance(existing, dict) else None
+    try:
+        expires_at = datetime.fromisoformat(str(stored_expiry).replace("Z", "+00:00")) if stored_expiry else now + timedelta(hours=settings.session_ttl_hours)
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+    except ValueError:
+        expires_at = now + timedelta(hours=settings.session_ttl_hours)
     repo.save_json(
         "session_meta",
         {
@@ -726,6 +779,40 @@ def session_status() -> SessionStatusResponse:
         sessionHint=session_id[-8:],
         expiresAt=expires_at.isoformat(),
         accountConnectionsEnabled=False,
+    )
+
+
+@router.delete("/session", response_model=SessionDeleteResponse)
+def delete_session(response: Response) -> SessionDeleteResponse:
+    if not settings.anonymous_mode:
+        raise HTTPException(
+            status_code=403,
+            detail={"error": "Session deletion is only available in anonymous mode", "code": "session_delete_unavailable"},
+        )
+    namespace = current_session_namespace()
+    if not namespace:
+        raise HTTPException(status_code=500, detail={"error": "Anonymous session unavailable", "code": "session_unavailable"})
+    if takeout_imports.active_for_scope(namespace) or spotify_history_imports.active_for_scope(namespace):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "Import still running",
+                "detail": "Wait for the current import to finish, then delete the session.",
+                "code": "session_import_active",
+            },
+        )
+    deleted = current_session_cleanup().purge_namespace(namespace)
+    response.delete_cookie(
+        key=settings.session_cookie_name,
+        path="/",
+        secure=settings.session_cookie_secure,
+        httponly=True,
+        samesite=settings.session_cookie_samesite,
+    )
+    return SessionDeleteResponse(
+        deleted=True,
+        cacheRowsDeleted=deleted["cacheRows"],
+        listeningEventsDeleted=deleted["events"],
     )
 
 
@@ -976,12 +1063,19 @@ async def import_takeout(file: UploadFile = File(...)) -> TakeoutImportQueuedRes
                 "code": "takeout_file_type_invalid",
             },
         )
+    enforce_anonymous_upload_limit()
     try:
         job_id = takeout_imports.reserve(suffix)
     except TakeoutImportAlreadyRunning as exc:
         raise HTTPException(
             status_code=409,
             detail={"error": "Takeout import already running", "detail": str(exc), "code": "takeout_import_in_progress"},
+        ) from exc
+    except TakeoutImportCapacityReached as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "Importer busy", "detail": str(exc), "code": "anonymous_import_capacity_reached"},
+            headers={"Retry-After": "60"},
         ) from exc
 
     import_dir = (
@@ -996,12 +1090,12 @@ async def import_takeout(file: UploadFile = File(...)) -> TakeoutImportQueuedRes
         with upload_path.open("wb") as destination:
             while chunk := await file.read(1024 * 1024):
                 file_size += len(chunk)
-                if file_size > settings.takeout_max_upload_bytes:
+                if file_size > settings.effective_upload_limit_bytes:
                     raise HTTPException(
                         status_code=413,
                         detail={
                             "error": "Takeout upload is too large",
-                            "detail": f"The upload exceeds the configured {settings.takeout_max_upload_bytes // (1024 * 1024)} MB limit.",
+                            "detail": f"The upload exceeds the configured {settings.effective_upload_limit_bytes // (1024 * 1024)} MB limit.",
                             "code": "takeout_upload_too_large",
                         },
                     )
@@ -1072,6 +1166,14 @@ def process_takeout_import(
             job_id,
             "No usable YouTube Music play events were found. Check that the export contains watch history.",
             "takeout_no_accepted_events",
+            "parsing",
+        )
+        return
+    if settings.anonymous_mode and len(parsed.entries) > settings.anonymous_max_events:
+        coordinator.fail(
+            job_id,
+            f"This export contains more than the hosted limit of {settings.anonymous_max_events:,} music events.",
+            "anonymous_event_limit_exceeded",
             "parsing",
         )
         return
@@ -1228,12 +1330,19 @@ async def import_spotify_history(file: UploadFile = File(...)) -> TakeoutImportQ
                 "code": "spotify_history_file_type_invalid",
             },
         )
+    enforce_anonymous_upload_limit()
     try:
         job_id = spotify_history_imports.reserve(suffix)
     except TakeoutImportAlreadyRunning as exc:
         raise HTTPException(
             status_code=409,
             detail={"error": "Spotify history import already running", "detail": str(exc), "code": "spotify_history_import_in_progress"},
+        ) from exc
+    except TakeoutImportCapacityReached as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "Importer busy", "detail": str(exc), "code": "anonymous_import_capacity_reached"},
+            headers={"Retry-After": "60"},
         ) from exc
 
     import_dir = Path(tempfile.gettempdir()) / "saville-music-persona" / "spotify-history-imports"
@@ -1244,12 +1353,12 @@ async def import_spotify_history(file: UploadFile = File(...)) -> TakeoutImportQ
         with upload_path.open("wb") as destination:
             while chunk := await file.read(1024 * 1024):
                 file_size += len(chunk)
-                if file_size > settings.takeout_max_upload_bytes:
+                if file_size > settings.effective_upload_limit_bytes:
                     raise HTTPException(
                         status_code=413,
                         detail={
                             "error": "Spotify history upload is too large",
-                            "detail": f"The upload exceeds the configured {settings.takeout_max_upload_bytes // (1024 * 1024)} MB limit.",
+                            "detail": f"The upload exceeds the configured {settings.effective_upload_limit_bytes // (1024 * 1024)} MB limit.",
                             "code": "spotify_history_upload_too_large",
                         },
                     )
@@ -1312,6 +1421,14 @@ def process_spotify_history_import(
             job_id,
             "No usable Spotify music plays were found. Podcast, audiobook, and zero-playback rows are ignored.",
             "spotify_history_no_accepted_events",
+            "parsing",
+        )
+        return
+    if settings.anonymous_mode and len(parsed.entries) > settings.anonymous_max_events:
+        coordinator.fail(
+            job_id,
+            f"This export contains more than the hosted limit of {settings.anonymous_max_events:,} music events.",
+            "anonymous_event_limit_exceeded",
             "parsing",
         )
         return

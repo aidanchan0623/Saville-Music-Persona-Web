@@ -432,6 +432,12 @@ class RecordingCatalog:
             )
         return {"tracks": len(tracks), "recordingsLinked": len(resolutions), "eventsIndexed": len(events)}
 
+    def delete_profile_source_prefix(self, prefix: str) -> int:
+        """Remove one anonymous profile's derived event index, retaining shared recordings."""
+        with self.connect() as conn:
+            cursor = conn.execute("DELETE FROM listening_events WHERE profile_source LIKE ?", (f"{prefix}%",))
+            return int(cursor.rowcount or 0)
+
     def add_identifier(self, recording_id: str, namespace: str, value: str, confidence: float) -> None:
         with self.connect() as conn:
             conn.execute(

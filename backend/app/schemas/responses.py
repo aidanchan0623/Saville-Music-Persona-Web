@@ -19,6 +19,12 @@ class SessionStatusResponse(BaseModel):
     accountConnectionsEnabled: bool
 
 
+class SessionDeleteResponse(BaseModel):
+    deleted: bool
+    cacheRowsDeleted: int
+    listeningEventsDeleted: int
+
+
 class PrerequisiteItem(BaseModel):
     name: str
     available: bool

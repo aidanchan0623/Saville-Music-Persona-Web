@@ -25,7 +25,10 @@ class Settings:
         self.backend_dir = Path(__file__).resolve().parents[1]
         self.project_root = Path(__file__).resolve().parents[2]
         self.private_dir = Path(os.getenv("SMP_PRIVATE_DIR", self.backend_dir / "private"))
-        self.deployment_mode = os.getenv("SMP_DEPLOYMENT_MODE", "local").strip().casefold()
+        # This repository is the hosted edition. The separate desktop repo
+        # remains local-first, while an omitted production variable here must
+        # fail closed into anonymous, account-disconnected behavior.
+        self.deployment_mode = os.getenv("SMP_DEPLOYMENT_MODE", "anonymous").strip().casefold()
         if self.deployment_mode not in {"local", "anonymous"}:
             raise ValueError("SMP_DEPLOYMENT_MODE must be local or anonymous")
         # Hosted anonymous deployments must never inherit account credentials
@@ -44,6 +47,20 @@ class Settings:
             raise ValueError("SMP_SESSION_COOKIE_SAMESITE must be lax, strict, or none")
         if self.session_cookie_samesite == "none" and not self.session_cookie_secure:
             raise ValueError("SMP_SESSION_COOKIE_SECURE must be true when SMP_SESSION_COOKIE_SAMESITE=none")
+        self.session_cleanup_interval_seconds = max(
+            30,
+            int(os.getenv("SMP_SESSION_CLEANUP_INTERVAL_SECONDS", "300")),
+        )
+        self.anonymous_max_upload_bytes = max(
+            1024 * 1024,
+            int(os.getenv("SMP_ANONYMOUS_MAX_UPLOAD_BYTES", str(100 * 1024 * 1024))),
+        )
+        self.anonymous_max_events = max(1_000, int(os.getenv("SMP_ANONYMOUS_MAX_EVENTS", "250000")))
+        self.anonymous_uploads_per_hour = max(1, int(os.getenv("SMP_ANONYMOUS_UPLOADS_PER_HOUR", "4")))
+        self.anonymous_max_concurrent_imports = max(
+            1,
+            int(os.getenv("SMP_ANONYMOUS_MAX_CONCURRENT_IMPORTS", "2")),
+        )
         self.data_dir = Path(os.getenv("SMP_DATA_DIR", self.project_root / "data"))
         self.raw_dir = self.data_dir / "raw"
         self.db_path = Path(os.getenv("SMP_DB_PATH", self.data_dir / "saville_music_persona.db"))
@@ -90,6 +107,12 @@ class Settings:
     @property
     def anonymous_mode(self) -> bool:
         return self.deployment_mode == "anonymous"
+
+    @property
+    def effective_upload_limit_bytes(self) -> int:
+        if self.anonymous_mode:
+            return min(self.takeout_max_upload_bytes, self.anonymous_max_upload_bytes)
+        return self.takeout_max_upload_bytes
 
     def ensure_local_dirs(self) -> None:
         if not self.anonymous_mode:

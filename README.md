@@ -1,8 +1,8 @@
-# Saville Music Persona
+# Saville Music Persona Web
 
-Saville Music Persona is a private, local-first web app that analyses your YouTube Music listening taste with `ytmusicapi`, optionally analyses a separate Spotify profile, then uses deterministic Music Character rules with an optional local Ollama model (`gemma3:4b`) to write a polished music-personality report.
+This repository is the anonymous hosted edition of Saville Music Persona. Visitors do not create an account or connect a music service: they upload a Google Takeout or Spotify extended streaming-history export, explore the generated dashboard, and can delete the session immediately. The original desktop/local edition remains in [Saville-Music-Persona](https://github.com/aidanchan0623/Saville-Music-Persona) at the `local-v1.0` tag.
 
-No OpenAI, Gemini, or paid cloud API key is required. Credentials, cached history, reports, and playlist exports stay on your Windows laptop.
+The deterministic analytics path needs no paid LLM API. Hosted report prose currently uses deterministic fallbacks; a bounded hosted LLM adapter is a later deployment phase.
 
 ## Screenshots
 
@@ -137,11 +137,23 @@ Default URLs:
 - Frontend: `http://localhost:5173`
 - Backend: `http://localhost:8000`
 
-## Anonymous hosted mode (Phase 1 foundation)
+## Anonymous hosted mode (Phases 1–2)
 
 Set `SMP_DEPLOYMENT_MODE=anonymous` before the backend starts to switch from the single-user desktop runtime to cookie-isolated upload sessions. The browser first calls `/api/session`; the backend issues an opaque HTTP-only cookie, and all listening profiles, analytics, reports, and background-job state are transparently stored under that session namespace. Reusable public music metadata caches remain shared, but one visitor cannot read another visitor's listening profile. Canonical listening-event index keys are session-scoped as well, so two people may import the same event without a database collision.
 
-Anonymous mode disables YouTube Music and Spotify account connections, playlist writes, local credential discovery, and calls to the developer's local Ollama service. Visitors use Google Takeout or Spotify extended streaming-history uploads instead. Temporary upload files are removed when their background import finishes, and simultaneous imports are reserved independently per browser session.
+The Web repository defaults to `anonymous` if the variable is omitted, so a hosted process cannot accidentally expose local account-connection routes. For plain-HTTP development, explicitly use `SMP_SESSION_COOKIE_SECURE=false`; use the separate desktop repository for the complete local/Ollama experience.
+
+Anonymous mode disables YouTube Music and Spotify account connections, playlist writes, local credential discovery, and calls to the developer's local Ollama service. Visitors use Google Takeout or Spotify extended streaming-history uploads instead.
+
+Phase 2 adds a bounded lifecycle:
+
+- Session expiry is absolute; refreshing the page does not silently renew it.
+- Expired cache rows and their derived listening-event index are purged automatically.
+- Temporary upload files are removed after processing, with stale-file cleanup as a fallback.
+- Visitors can delete their own session immediately from Settings.
+- Public metadata about songs/artists may remain shared, but listening events, reports, rankings, and uploads do not.
+- Upload size, event count, hourly upload frequency, and process-wide concurrent imports are capped.
+- Rate limits are keyed only by the opaque session cookie; the app does not create user accounts or an analytics identity.
 
 Example hosted environment:
 
@@ -150,13 +162,18 @@ SMP_DEPLOYMENT_MODE=anonymous
 SMP_SESSION_COOKIE_SECURE=true
 SMP_SESSION_COOKIE_SAMESITE=none
 SMP_SESSION_TTL_HOURS=24
+SMP_SESSION_CLEANUP_INTERVAL_SECONDS=300
+SMP_ANONYMOUS_MAX_UPLOAD_BYTES=104857600
+SMP_ANONYMOUS_MAX_EVENTS=250000
+SMP_ANONYMOUS_UPLOADS_PER_HOUR=4
+SMP_ANONYMOUS_MAX_CONCURRENT_IMPORTS=2
 SMP_CORS_ORIGINS=https://your-frontend.example
 SMP_FRONTEND_URL=https://your-frontend.example
 ```
 
 Use `SMP_SESSION_COOKIE_SECURE=false` only for plain-HTTP localhost testing. When frontend and API use different sites, set `SMP_SESSION_COOKIE_SAMESITE=none`, configure the exact frontend origin rather than `*`, and keep credentialed requests enabled.
 
-Phase 1 establishes isolation and removes account-authentication paths; it does **not** yet make the deployment production-ready. Automatic expiry/deletion of persisted session rows, upload abuse controls, storage quotas, and the hosted LLM/provider design belong to the next phases. Until that cleanup lifecycle is implemented, run anonymous mode only in a controlled test environment and remove its test database between trials.
+Phases 1–2 establish isolation, deletion, expiry, and basic resource controls. Production deployment still needs Phase 3 infrastructure (durable hosted storage and worker topology), Phase 4 hosted metadata/LLM adapters, and Phase 5 observability, responsive acceptance testing, and launch hardening.
 
 ## Development commands
 
