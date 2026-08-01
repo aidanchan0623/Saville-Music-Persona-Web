@@ -29,13 +29,30 @@ interface PollOptions<T extends PollableJob> {
   signal: AbortSignal;
   timeoutMs?: number;
   intervalMs?: number;
+  networkFailureLimit?: number;
   onStatus?: (status: T) => void;
   isComplete?: (status: T) => boolean;
 }
 
+interface ChainedJob extends PollableJob {
+  continueQueued?: boolean | null;
+}
+
+interface ChainedPollOptions<T extends ChainedJob> extends Omit<PollOptions<T>, "isComplete"> {
+  batchDelayMs?: number;
+  onBatchComplete?: (status: T) => void | Promise<void>;
+}
+
 export async function pollTakeoutImport<T extends PollableJob>(
   getStatus: (signal: AbortSignal) => Promise<T>,
-  { signal, timeoutMs = 10 * 60 * 1000, intervalMs = 1000, onStatus, isComplete = (status) => status.status === "complete" }: PollOptions<T>,
+  {
+    signal,
+    timeoutMs = 10 * 60 * 1000,
+    intervalMs = 1000,
+    networkFailureLimit = 8,
+    onStatus,
+    isComplete = (status) => status.status === "complete",
+  }: PollOptions<T>,
 ): Promise<T> {
   const startedAt = Date.now();
   let networkFailures = 0;
@@ -53,13 +70,69 @@ export async function pollTakeoutImport<T extends PollableJob>(
       if (signal.aborted || (error instanceof DOMException && error.name === "AbortError")) throw error;
       if (error instanceof Error && /\([a-z_]+\)$/.test(error.message)) throw error;
       networkFailures += 1;
-      if (networkFailures >= 3) {
-        throw new Error("Lost contact with the backend while processing local music data. Check that it is running, then retry.");
+      if (networkFailures >= networkFailureLimit) {
+        throw new Error("The server stayed unavailable while processing metadata. Your saved listening data is safe; refresh and resume in a moment.");
       }
     }
     await abortableDelay(intervalMs, signal);
   }
   throw new Error("Local music processing timed out. Your previous profile is still available; retry after checking the backend.");
+}
+
+/**
+ * Run one hosted-safe batch at a time, yielding between batches so normal
+ * dashboard requests are never starved by a continuous enrichment loop.
+ * The browser may stop at any point: each completed batch is already durable.
+ */
+export async function pollChainedJob<T extends ChainedJob>(
+  startBatch: () => Promise<T>,
+  getStatus: (signal: AbortSignal) => Promise<T>,
+  {
+    signal,
+    timeoutMs = 30 * 60 * 1000,
+    intervalMs = 1500,
+    networkFailureLimit = 12,
+    batchDelayMs = 4000,
+    onStatus,
+    onBatchComplete,
+  }: ChainedPollOptions<T>,
+): Promise<T> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (signal.aborted) throw new DOMException("Metadata enrichment polling was cancelled.", "AbortError");
+    let queued: T | null = null;
+    let startFailures = 0;
+    while (!queued && Date.now() - startedAt < timeoutMs) {
+      try {
+        queued = await startBatch();
+      } catch (error) {
+        if (signal.aborted || (error instanceof DOMException && error.name === "AbortError")) throw error;
+        if (error instanceof Error && /\([a-z_]+\)$/.test(error.message)) throw error;
+        startFailures += 1;
+        if (startFailures >= networkFailureLimit) {
+          throw new Error("The server stayed unavailable before the next metadata batch could start. Saved progress will resume on the next visit.");
+        }
+        await abortableDelay(intervalMs, signal);
+      }
+    }
+    if (!queued) break;
+    const batch = queued.status === "complete"
+      ? queued
+      : await pollTakeoutImport(getStatus, {
+          signal,
+          timeoutMs: Math.max(1, timeoutMs - (Date.now() - startedAt)),
+          intervalMs,
+          networkFailureLimit,
+          onStatus,
+        });
+    if (batch.status === "failed") {
+      throw new Error(`${batch.message}${batch.errorCode ? ` (${batch.errorCode})` : ""}`);
+    }
+    await onBatchComplete?.(batch);
+    if (!batch.continueQueued) return batch;
+    await abortableDelay(batchDelayMs, signal);
+  }
+  throw new Error("Metadata enrichment paused after its safe processing window. Saved progress will resume on the next visit.");
 }
 
 function abortableDelay(milliseconds: number, signal: AbortSignal): Promise<void> {

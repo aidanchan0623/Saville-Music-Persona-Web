@@ -41,6 +41,12 @@ function paramsWithSource(source: MusicSource = "youtube", values: Record<string
   return params;
 }
 
+function hostedSafeHttpMessage(status: number, message: string) {
+  return [502, 503, 504].includes(status)
+    ? "The server is temporarily busy processing saved metadata. Your listening data is safe; retry in a moment."
+    : message;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
     ...init,
@@ -58,7 +64,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     } catch {
       // Keep the HTTP status message.
     }
-    throw new Error(message);
+    throw new Error(hostedSafeHttpMessage(response.status, message));
   }
   return response.json() as Promise<T>;
 }
@@ -113,7 +119,7 @@ export const api = {
       } catch {
         // Keep HTTP status message.
       }
-      throw new Error(message);
+      throw new Error(hostedSafeHttpMessage(response.status, message));
     }
     return response.json() as Promise<TakeoutImportQueued>;
   },
@@ -131,7 +137,7 @@ export const api = {
       } catch {
         // Keep HTTP status message.
       }
-      throw new Error(message);
+      throw new Error(hostedSafeHttpMessage(response.status, message));
     }
     return response.json() as Promise<TakeoutImportQueued>;
   },

@@ -15,6 +15,7 @@ import type {
   TopAlbumsResponse,
   TopArtistSongsResponse,
   TopDrilldownSong,
+  PeriodSpec,
 } from "../types/api";
 import { formatDate } from "../utils/format";
 import "./Top10Page.css";
@@ -36,11 +37,18 @@ export function Top10Page({ source, titleAnimationKey }: { source: MusicSource; 
   const [artistLoading, setArtistLoading] = useState(false);
   const [albumLoading, setAlbumLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [availableMonths, setAvailableMonths] = useState<PeriodSpec["available_months"]>([]);
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     setError(null);
+    // Never leave rankings from the previous period on screen while a new
+    // request is loading or has failed. That made a selected July filter look
+    // like August with zero plays after a transient hosted 502.
+    setTracks(null);
+    setArtists(null);
+    setAlbums(null);
     Promise.all([
       api.periodTop(period, "tracks", period === "month" ? selectedMonth : null, source),
       api.periodTop(period, "artists", period === "month" ? selectedMonth : null, source),
@@ -52,6 +60,7 @@ export function Top10Page({ source, titleAnimationKey }: { source: MusicSource; 
         setArtists(nextArtists);
         setAlbums(nextAlbums);
         const availableMonths = nextTracks.period.available_months.length ? nextTracks.period.available_months : nextAlbums.period.available_months;
+        setAvailableMonths(availableMonths);
         if (period === "month" && !selectedMonth && availableMonths.length) {
           setSelectedMonth(availableMonths[availableMonths.length - 1].value);
         }
@@ -111,22 +120,12 @@ export function Top10Page({ source, titleAnimationKey }: { source: MusicSource; 
     };
   }, [selectedAlbum, period, selectedMonth, source]);
 
-  const months = tracks?.period.available_months ?? artists?.period.available_months ?? albums?.period.available_months ?? [];
-  const activeLabel = displayPeriodLabel(tracks?.period.label ?? albums?.period.label, period);
-
-  if (!tracks && !artists && !albums && !loading) {
-    return (
-      <div className="space-y-6">
-        <PageTitlePanel
-          title="Top 10"
-          titleAnimationKey={titleAnimationKey}
-          titleClassName="text-4xl font-black leading-none text-white md:text-5xl"
-          className="top10-title-panel"
-        />
-        <GlowPanel as="section" variant="card" className="p-5 text-sm text-mist">No rankings yet.</GlowPanel>
-      </div>
-    );
-  }
+  const responseMonths = tracks?.period.available_months ?? artists?.period.available_months ?? albums?.period.available_months ?? [];
+  const months = responseMonths.length ? responseMonths : availableMonths;
+  const selectedMonthLabel = months.find((month) => month.value === selectedMonth)?.label ?? formatMonthValue(selectedMonth);
+  const activeLabel = period === "month"
+    ? selectedMonthLabel
+    : displayPeriodLabel(tracks?.period.label ?? albums?.period.label, period);
 
   return (
     <div className="space-y-8">
@@ -146,6 +145,7 @@ export function Top10Page({ source, titleAnimationKey }: { source: MusicSource; 
               className="rounded-md border border-white/10 bg-ink px-3 py-2 text-sm text-white"
               value={selectedMonth ?? months.at(-1)?.value ?? ""}
               onChange={(event) => setSelectedMonth(event.target.value)}
+              aria-label="Select Top 10 month"
             >
               {months.map((month) => (
                 <option key={month.value} value={month.value}>{month.label}</option>
@@ -156,7 +156,9 @@ export function Top10Page({ source, titleAnimationKey }: { source: MusicSource; 
         }
         metadata={
           <span>
-            {activeLabel} &middot; {(tracks?.total_play_count ?? 0).toLocaleString()} {source === "spotify" ? "ranking signals" : "plays"}
+            {activeLabel} &middot; {error
+              ? "Rankings temporarily unavailable"
+              : `${(tracks?.total_play_count ?? 0).toLocaleString()} ${source === "spotify" ? "ranking signals" : "plays"}`}
             {loading ? " · Updating" : ""}
           </span>
         }
@@ -172,17 +174,19 @@ export function Top10Page({ source, titleAnimationKey }: { source: MusicSource; 
 
       <RankingStorySection
         kind="songs"
-        title={`Top Songs - ${displayPeriodLabel(tracks?.period.label, period)}`}
+        title={`Top Songs - ${activeLabel}`}
         response={tracks}
         loading={loading}
+        unavailable={Boolean(error)}
         source={source}
       />
 
       <RankingStorySection
         kind="artists"
-        title={`Top Artists - ${displayPeriodLabel(artists?.period.label, period)}`}
+        title={`Top Artists - ${activeLabel}`}
         response={artists}
         loading={loading}
+        unavailable={Boolean(error)}
         source={source}
         selectedArtist={selectedArtist}
         onViewSongs={setSelectedArtist}
@@ -214,6 +218,7 @@ function RankingStorySection({
   title,
   response,
   loading,
+  unavailable = false,
   selectedArtist,
   onViewSongs,
   source,
@@ -222,6 +227,7 @@ function RankingStorySection({
   title: string;
   response: PeriodTopResponse | null;
   loading: boolean;
+  unavailable?: boolean;
   selectedArtist?: string | null;
   onViewSongs?: (artist: string) => void;
   source: MusicSource;
@@ -242,7 +248,11 @@ function RankingStorySection({
           {loading ? <span className="text-sm text-mist">Loading...</span> : null}
         </div>
         <GlowPanel as="div" variant="row" wrapperClassName="mt-5" className="p-5 text-sm text-mist">
-          {loading ? "Loading rankings..." : "No detected plays in this period."}
+          {loading
+            ? "Loading rankings..."
+            : unavailable
+              ? "Rankings are temporarily unavailable. Your saved listening data has not been replaced."
+              : "No detected plays in this period."}
         </GlowPanel>
       </GlowPanel>
     );
@@ -661,6 +671,12 @@ function displayPeriodLabel(label: string | undefined, period: TopPeriod) {
   if (period === "rolling_year") return "Rolling Year";
   if (period === "all") return "All History";
   return label ?? "Selected Period";
+}
+
+function formatMonthValue(value: string | null) {
+  if (!value || !/^\d{4}-\d{2}$/.test(value)) return "Selected Period";
+  const [year, month] = value.split("-").map(Number);
+  return new Intl.DateTimeFormat("en-US", { month: "long", year: "numeric", timeZone: "UTC" }).format(new Date(Date.UTC(year, month - 1, 1)));
 }
 
 function spotifyEvidenceLabel(item: PeriodTopItem, source: MusicSource, artistList: boolean) {

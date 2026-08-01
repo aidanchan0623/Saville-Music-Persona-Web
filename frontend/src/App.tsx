@@ -2,7 +2,7 @@ import { Menu, Music2, X } from "lucide-react";
 import type { CSSProperties } from "react";
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "./api/client";
-import { pollTakeoutImport, runExclusiveOperation } from "./api/takeoutImport";
+import { pollChainedJob, pollTakeoutImport, runExclusiveOperation } from "./api/takeoutImport";
 import { GlowPanel } from "./components/GlowPanel";
 import { DesktopSidebar } from "./components/navigation/DesktopSidebar";
 import { NAVIGATION_ITEMS } from "./components/navigation/navigation";
@@ -420,22 +420,24 @@ export default function App() {
     const controller = new AbortController();
     durationAbortControllerRef.current = controller;
     try {
-      const queued = await api.startDurationEnrichment();
-      if (queued.status === "complete" || queued.status === "idle") {
-        void enrichGenresInBackground("youtube", false);
-        return;
-      }
-      const result = await pollTakeoutImport(
+      const result = await pollChainedJob(
+        () => api.startDurationEnrichment(),
         (signal) => api.durationEnrichmentStatus(signal),
         {
           signal: controller.signal,
           intervalMs: 1500,
-          timeoutMs: 6 * 60 * 1000,
+          timeoutMs: 30 * 60 * 1000,
+          networkFailureLimit: 12,
+          batchDelayMs: 4000,
           onStatus: (status) => setMessage(`${status.message} (${status.progress}%)`),
-          isComplete: (status) => status.status === "complete" && !status.continueQueued,
+          onBatchComplete: async (status) => {
+            await loadAnalysis("youtube");
+            if (status.continueQueued) {
+              setMessage(`${status.message} Pausing briefly before the next saved batch.`);
+            }
+          },
         },
       );
-      await loadAnalysis("youtube");
       setMessage(result.message);
       void enrichGenresInBackground("youtube", true);
     } catch (error) {

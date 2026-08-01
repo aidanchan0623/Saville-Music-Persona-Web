@@ -24,7 +24,7 @@ class DurationEnrichmentAlreadyRunning(RuntimeError):
 
 
 class DurationEnrichmentCoordinator:
-    """One local metadata job at a time; it never replaces a usable profile until rebuilt."""
+    """Run one durable metadata batch at a time without starving API traffic."""
 
     def __init__(self, repo: JsonRepository, timeout_seconds: int) -> None:
         self.repo = repo
@@ -69,7 +69,6 @@ class DurationEnrichmentCoordinator:
 
     def _run(self, processor: Processor) -> None:
         deadline = time.monotonic() + self.timeout_seconds
-        continue_with_next_batch = False
         try:
             processor(self, deadline)
         except TimeoutError:
@@ -81,10 +80,6 @@ class DurationEnrichmentCoordinator:
             scope = current_session_namespace() or "local"
             with self._lock:
                 self._active_scopes.discard(scope)
-            completed = self.status()
-            continue_with_next_batch = bool(completed and completed.get("status") == "complete" and completed.get("continueQueued"))
-            if continue_with_next_batch:
-                self.start(processor)
 
     def stage(self, status: str, message: str, **fields: Any) -> dict[str, Any]:
         # Do not run restart recovery while the worker itself advances stages.

@@ -252,21 +252,22 @@ def test_anonymous_duration_job_recovers_lazily_after_backend_restart(tmp_path: 
     assert "Saved metadata was kept" in recovered["message"]
 
 
-def test_duration_enrichment_queues_the_next_safe_batch(tmp_path: Path) -> None:
+def test_duration_enrichment_leaves_the_next_safe_batch_for_the_client(tmp_path: Path) -> None:
     coordinator = DurationEnrichmentCoordinator(JsonRepository(tmp_path / "continuation.db"), timeout_seconds=30)
     completed = threading.Event()
     calls: list[int] = []
 
     def processor(active: DurationEnrichmentCoordinator, _deadline: float) -> None:
         calls.append(len(calls) + 1)
-        active.stage("complete", "done", continueQueued=len(calls) == 1)
-        if len(calls) == 2:
-            completed.set()
+        active.stage("complete", "done", continueQueued=True)
+        completed.set()
 
     coordinator.start(processor)
 
     assert completed.wait(timeout=2)
-    assert calls == [1, 2]
+    time.sleep(0.05)
+    assert calls == [1]
+    assert coordinator.status()["continueQueued"] is True
 
 
 def test_timeout_check_raises_safe_timeout(tmp_path: Path) -> None:

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { pollTakeoutImport, runExclusiveOperation } from "../src/api/takeoutImport.ts";
+import { pollChainedJob, pollTakeoutImport, runExclusiveOperation } from "../src/api/takeoutImport.ts";
 
 const status = (state, message = state) => ({
   jobId: "job-1",
@@ -47,20 +47,60 @@ test("polling returns the completed profile", async () => {
   assert.equal(result.playCount, 3);
 });
 
-test("polling continues across completed duration batches", async () => {
+test("chained polling starts each duration batch explicitly", async () => {
+  const starts = [
+    { ...status("queued"), continueQueued: false },
+    { ...status("queued"), continueQueued: false },
+  ];
   const responses = [
     { ...status("complete"), continueQueued: true },
-    { ...status("resolving"), continueQueued: false },
     { ...status("complete"), continueQueued: false },
   ];
-  const result = await pollTakeoutImport(async () => responses.shift() ?? status("complete"), {
+  let startCalls = 0;
+  const result = await pollChainedJob(async () => {
+    startCalls += 1;
+    return starts.shift() ?? { ...status("complete"), continueQueued: false };
+  }, async () => responses.shift() ?? { ...status("complete"), continueQueued: false }, {
     signal: new AbortController().signal,
     intervalMs: 1,
+    batchDelayMs: 1,
     timeoutMs: 100,
-    isComplete: (value) => value.status === "complete" && !value.continueQueued,
   });
   assert.equal(result.status, "complete");
+  assert.equal(startCalls, 2);
   assert.equal(responses.length, 0);
+});
+
+test("polling tolerates a short hosted gateway interruption", async () => {
+  let calls = 0;
+  const result = await pollTakeoutImport(async () => {
+    calls += 1;
+    if (calls <= 5) throw new Error("502 Bad Gateway");
+    return status("complete");
+  }, {
+    signal: new AbortController().signal,
+    intervalMs: 1,
+    networkFailureLimit: 6,
+    timeoutMs: 100,
+  });
+  assert.equal(result.status, "complete");
+  assert.equal(calls, 6);
+});
+
+test("chained polling retries a transient batch-start gateway failure", async () => {
+  let startCalls = 0;
+  const result = await pollChainedJob(async () => {
+    startCalls += 1;
+    if (startCalls <= 3) throw new Error("The server is temporarily busy");
+    return { ...status("complete"), continueQueued: false };
+  }, async () => ({ ...status("complete"), continueQueued: false }), {
+    signal: new AbortController().signal,
+    intervalMs: 1,
+    networkFailureLimit: 4,
+    timeoutMs: 100,
+  });
+  assert.equal(result.status, "complete");
+  assert.equal(startCalls, 4);
 });
 
 test("polling exposes a failed job and stops", async () => {
