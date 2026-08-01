@@ -496,8 +496,11 @@ export default function App() {
 
   const analysisReady = Boolean(overview);
   useEffect(() => {
-    if (analysisReady && source === "youtube" && !useDemo) void enrichDurationsInBackground();
-  }, [analysisReady, source, useDemo]);
+    // Fresh imports and explicit refreshes already start enrichment directly.
+    // Only resume interrupted hosted work from Settings so route reads get
+    // priority when a visitor opens Top 10, Insights, or their report.
+    if (analysisReady && page === "settings" && source === "youtube" && !useDemo) void enrichDurationsInBackground();
+  }, [analysisReady, page, source, useDemo]);
 
   const createPlaylist = async () => {
     if (!runtime?.accountConnectionsEnabled) {
