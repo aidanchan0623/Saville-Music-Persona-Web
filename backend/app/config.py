@@ -56,13 +56,13 @@ class Settings:
         self.allowed_hosts = configured_hosts or ["*"]
         self.anonymous_max_upload_bytes = max(
             1024 * 1024,
-            int(os.getenv("SMP_ANONYMOUS_MAX_UPLOAD_BYTES", str(100 * 1024 * 1024))),
+            int(os.getenv("SMP_ANONYMOUS_MAX_UPLOAD_BYTES", str(512 * 1024 * 1024))),
         )
         self.anonymous_max_events = max(1_000, int(os.getenv("SMP_ANONYMOUS_MAX_EVENTS", "250000")))
         self.anonymous_uploads_per_hour = max(1, int(os.getenv("SMP_ANONYMOUS_UPLOADS_PER_HOUR", "4")))
         self.anonymous_max_concurrent_imports = max(
             1,
-            int(os.getenv("SMP_ANONYMOUS_MAX_CONCURRENT_IMPORTS", "2")),
+            int(os.getenv("SMP_ANONYMOUS_MAX_CONCURRENT_IMPORTS", "1")),
         )
         self.data_dir = Path(os.getenv("SMP_DATA_DIR", self.project_root / "data"))
         self.raw_dir = self.data_dir / "raw"
@@ -103,8 +103,8 @@ class Settings:
         self.genre_enrichment_timeout_seconds = int(os.getenv("SMP_GENRE_ENRICHMENT_TIMEOUT_SECONDS", "300"))
         self.release_year_enrichment_limit = int(os.getenv("SMP_RELEASE_YEAR_ENRICHMENT_LIMIT", "50"))
         self.track_metadata_enrichment_limit = int(os.getenv("SMP_TRACK_METADATA_ENRICHMENT_LIMIT", "100"))
-        self.takeout_max_upload_bytes = int(os.getenv("SMP_TAKEOUT_MAX_UPLOAD_BYTES", str(256 * 1024 * 1024)))
-        self.takeout_import_timeout_seconds = int(os.getenv("SMP_TAKEOUT_IMPORT_TIMEOUT_SECONDS", "600"))
+        self.takeout_max_upload_bytes = int(os.getenv("SMP_TAKEOUT_MAX_UPLOAD_BYTES", str(512 * 1024 * 1024)))
+        self.takeout_import_timeout_seconds = int(os.getenv("SMP_TAKEOUT_IMPORT_TIMEOUT_SECONDS", "1200"))
         self.refresh_timeout_seconds = int(os.getenv("SMP_REFRESH_TIMEOUT_SECONDS", "600"))
         auth_default = self.private_dir / "oauth.json"
         self.ytmusic_auth_file = Path(os.getenv("YTMUSIC_AUTH_FILE", auth_default))

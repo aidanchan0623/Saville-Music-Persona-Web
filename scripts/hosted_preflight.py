@@ -49,7 +49,13 @@ def assert_security_headers(headers, label: str) -> None:
         fail(f"{label} is missing security headers: {', '.join(missing)}")
 
 
-def run(base_url: str, *, operations_token: str | None, allow_insecure_cookie: bool) -> None:
+def run(
+    base_url: str,
+    *,
+    operations_token: str | None,
+    allow_insecure_cookie: bool,
+    minimum_upload_mib: int,
+) -> None:
     parsed = urlparse(base_url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         fail("Base URL must be an absolute http(s) URL")
@@ -57,7 +63,7 @@ def run(base_url: str, *, operations_token: str | None, allow_insecure_cookie: b
 
     status, headers, body = request(opener, base_url, "/api/health")
     health = json_body(body, "Health probe")
-    if status != 200 or not health.get("ok") or health.get("version") != "0.5.0":
+    if status != 200 or not health.get("ok") or health.get("version") != "0.6.0":
         fail(f"Health probe failed: HTTP {status}, payload={health}")
     assert_security_headers(headers, "Health probe")
 
@@ -65,6 +71,13 @@ def run(base_url: str, *, operations_token: str | None, allow_insecure_cookie: b
     ready = json_body(body, "Readiness probe")
     if status != 200 or not ready.get("ok") or ready.get("workerTopology") != "single-process":
         fail(f"Readiness probe failed: HTTP {status}, payload={ready}")
+    configured_upload_bytes = int((ready.get("limits") or {}).get("maxUploadBytes") or 0)
+    required_upload_bytes = minimum_upload_mib * 1024 * 1024
+    if configured_upload_bytes < required_upload_bytes:
+        fail(
+            "Readiness upload limit is too small: "
+            f"configured={configured_upload_bytes} bytes, required={required_upload_bytes} bytes"
+        )
 
     status, headers, body = request(opener, base_url, "/")
     if status != 200 or b"Saville Music Persona" not in body:
@@ -113,6 +126,12 @@ def main() -> int:
     parser.add_argument("base_url", help="Deployment origin, for example https://saville.example.com")
     parser.add_argument("--operations-token", help="Optional token used to verify the private aggregate status endpoint")
     parser.add_argument(
+        "--minimum-upload-mib",
+        type=int,
+        default=300,
+        help="Minimum advertised upload capacity to certify (default: 300 MiB)",
+    )
+    parser.add_argument(
         "--allow-insecure-cookie",
         action="store_true",
         help="Allow HTTP only for local/container smoke tests; never use this for a public deployment",
@@ -123,6 +142,7 @@ def main() -> int:
             args.base_url,
             operations_token=args.operations_token,
             allow_insecure_cookie=args.allow_insecure_cookie,
+            minimum_upload_mib=max(1, args.minimum_upload_mib),
         )
     except (RuntimeError, URLError) as exc:
         print(f"Preflight failed: {exc}", file=sys.stderr)

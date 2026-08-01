@@ -776,7 +776,7 @@ def health() -> dict[str, Any]:
     return {
         "ok": True,
         "app": "Saville Music Persona Web",
-        "version": "0.5.0",
+        "version": "0.6.0",
         "mode": settings.deployment_mode,
         "time": datetime.now(timezone.utc).isoformat(),
     }
@@ -800,6 +800,11 @@ def readiness() -> dict[str, Any]:
         "database": "writable",
         "frontend": "bundled" if settings.serve_frontend else "external",
         "workerTopology": "single-process",
+        "limits": {
+            "maxUploadBytes": settings.effective_upload_limit_bytes,
+            "maxEvents": settings.anonymous_max_events,
+            "concurrentImports": settings.anonymous_max_concurrent_imports,
+        },
         "security": {
             "anonymousSessions": settings.anonymous_mode,
             "secureCookies": settings.session_cookie_secure,
@@ -817,7 +822,7 @@ def operations_status(x_saville_ops_token: str | None = Header(default=None)) ->
     if not secrets.compare_digest(supplied, settings.operations_token):
         raise HTTPException(status_code=403, detail={"error": "Operator token required", "code": "ops_forbidden"})
     snapshot = current_operational_metrics().snapshot()
-    snapshot["version"] = "0.5.0"
+    snapshot["version"] = "0.6.0"
     snapshot["workerTopology"] = "single-process"
     snapshot["limits"] = {
         "maxUploadBytes": settings.effective_upload_limit_bytes,

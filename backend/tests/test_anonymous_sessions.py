@@ -88,9 +88,11 @@ def test_health_probes_do_not_create_visitor_sessions(tmp_path: Path, monkeypatc
     health = client.get("/api/health")
     ready = client.get("/api/ready")
     assert health.status_code == 200
-    assert health.json()["version"] == "0.5.0"
+    assert health.json()["version"] == "0.6.0"
     assert ready.status_code == 200
     assert ready.json()["workerTopology"] == "single-process"
+    assert ready.json()["limits"]["maxUploadBytes"] == routes.settings.effective_upload_limit_bytes
+    assert ready.json()["limits"]["concurrentImports"] == routes.settings.anonymous_max_concurrent_imports
     assert client.cookies.get(routes.settings.session_cookie_name) is None
 
 
@@ -117,7 +119,7 @@ def test_security_headers_and_private_operator_status(tmp_path: Path, monkeypatc
     )
     assert status.status_code == 200
     payload = status.json()
-    assert payload["version"] == "0.5.0"
+    assert payload["version"] == "0.6.0"
     assert payload["privacy"]["containsListeningHistory"] is False
     assert payload["privacy"]["containsSessionIdentifiers"] is False
     assert payload["counters"]["sessions.started"] == 1

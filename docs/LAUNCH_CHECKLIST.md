@@ -7,7 +7,7 @@ Use this checklist for the hosted Web edition only. The separate localhost repos
 - Deploy `ghcr.io/aidanchan0623/saville-music-persona-web:latest` from a successful `main` workflow.
 - Run exactly one container, one Uvicorn process, and `WEB_CONCURRENCY=1`.
 - Mount a persistent volume at `/var/lib/saville` and confirm it is writable by UID `10001`.
-- Allocate enough temporary disk for the configured concurrent uploads in addition to the persistent database.
+- Allocate at least 5 GiB at `/var/lib/saville`; temporary uploads live there while processing and are deleted when their job finishes.
 - Set the platform health check to `/api/ready`.
 - Disable autoscaling and overlapping rolling-deploy replicas for this test topology.
 
@@ -22,8 +22,8 @@ Use this checklist for the hosted Web edition only. The separate localhost repos
 
 ## 3. Capacity and cost controls
 
-- Start with `SMP_ANONYMOUS_MAX_CONCURRENT_IMPORTS=2` and `SMP_ANONYMOUS_MAX_CONCURRENT_REPORTS=2`.
-- Keep the 100 MB upload and 250,000-event defaults unless the host has enough memory and temporary storage.
+- Start with `SMP_ANONYMOUS_MAX_CONCURRENT_IMPORTS=1` and `SMP_ANONYMOUS_MAX_CONCURRENT_REPORTS=2`. One large import at a time is intentional on the single-instance friend-test server.
+- Keep the 512 MiB upload, 20-minute import timeout, and 250,000-event defaults. Allocate at least 2 GiB RAM and verify the provider's public proxy accepts a request larger than the actual 246 MiB Takeout before inviting testers.
 - If enabling a hosted writer, set per-session and global budgets before adding its API key.
 - Confirm that deterministic report fallback works with the hosted writer disabled.
 - Never place an LLM key in the frontend build or a browser-visible environment variable.
@@ -31,9 +31,10 @@ Use this checklist for the hosted Web edition only. The separate localhost repos
 ## 4. Acceptance checks
 
 - Wait for GitHub CI to pass backend tests, frontend checks, responsive Chromium checks, image smoke tests, and GHCR publication.
-- Run `python scripts/hosted_preflight.py https://your-app.example --operations-token YOUR_TOKEN`.
+- Run `python scripts/hosted_preflight.py https://your-app.example --operations-token YOUR_TOKEN --minimum-upload-mib 300`.
 - Open the URL once on an Android phone, an iPhone/iPad if available, and a desktop browser.
 - Upload one small Google Takeout sample and one small Spotify extended-history sample in separate fresh browser sessions.
+- In a disposable test session, upload the real 246 MiB Takeout and confirm the job reaches `complete`. The preflight verifies the configured ceiling, but only this end-to-end test verifies the hosting proxy and connection timeout.
 - Confirm a second private/incognito browser cannot see the first browser's profile.
 - Use Settings to delete each test session, then confirm refreshing creates an empty new session.
 - Restart the container once and confirm `/api/ready` returns 200 and shared public metadata survives on the volume.

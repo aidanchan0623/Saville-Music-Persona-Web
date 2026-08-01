@@ -77,12 +77,31 @@ Useful resource settings:
 ```text
 SMP_SESSION_TTL_HOURS=24
 SMP_SESSION_CLEANUP_INTERVAL_SECONDS=300
-SMP_ANONYMOUS_MAX_UPLOAD_BYTES=104857600
+SMP_ANONYMOUS_MAX_UPLOAD_BYTES=536870912
+SMP_TAKEOUT_MAX_UPLOAD_BYTES=536870912
+SMP_TAKEOUT_IMPORT_TIMEOUT_SECONDS=1200
 SMP_ANONYMOUS_MAX_EVENTS=250000
 SMP_ANONYMOUS_UPLOADS_PER_HOUR=4
-SMP_ANONYMOUS_MAX_CONCURRENT_IMPORTS=2
+SMP_ANONYMOUS_MAX_CONCURRENT_IMPORTS=1
 SMP_ACCESS_LOG=false
 ```
+
+The two upload limits are both set because anonymous mode deliberately applies the smaller value. `536870912` is 512 MiB, which safely admits the current 246.1 MiB Takeout. Its expanded archive is about 315 MiB and remains below Saville's separate 1 GiB archive-expansion guard. The application streams the request to disk in 1 MiB chunks and deletes it after processing, so the whole ZIP is not buffered in application memory. The host or reverse proxy must still accept the request and keep the connection open long enough to finish the upload.
+
+For this profile, allocate at least 2 GiB RAM and a 5 GiB persistent volume. Do not raise the archive-expansion guard merely to accept a larger compressed ZIP: inspect the archive contents first, because a large ratio can indicate an accidental export of unrelated media or a ZIP bomb.
+
+## Railway friend-test deployment
+
+`railway.json` selects the repository Dockerfile, `/api/ready`, and an on-failure restart policy. Railway can build directly from the GitHub repository, so a separate image registry credential is not required.
+
+1. Create one Railway service from `aidanchan0623/Saville-Music-Persona-Web` on the `main` branch.
+2. Select the Singapore region and keep exactly one replica.
+3. Add a volume of at least 5 GiB mounted at `/var/lib/saville`.
+4. Add the environment values above. Also set `RAILWAY_RUN_UID=0`, because Railway volumes are mounted as root while the portable image normally runs as UID `10001`.
+5. Generate a Railway domain, set `SMP_ALLOWED_HOSTS` to that hostname, and deploy.
+6. Run the hosted preflight, then upload the real 246 MiB Takeout in a disposable session.
+
+Do not enable serverless sleep, replicas, or horizontal autoscaling. The current SQLite and in-process import coordinators require one continuously running instance. Volume creation, sizing, domain generation, secrets, and plan acceptance remain host-account actions and cannot be encoded safely in the public repository.
 
 ## Phase 4 optional hosted report writer
 
@@ -121,9 +140,9 @@ External lookups are bounded by batch size and job deadline. Completed evidence 
 
 ## Free-hosting trade-off
 
-The container can run on a free container service if it supports the image and at least 100 MB request bodies. Many free services provide only an ephemeral filesystem. Saville will still work there, but a restart may erase active sessions and the shared metadata cache. That failure mode is privacy-safe, but it is not durable.
+A truly free, durable deployment is not a dependable match for 246+ MiB uploads. Free instances commonly have too little RAM, too little temporary storage, sleeping processes, or no persistent volume. An ephemeral deployment is privacy-safe when it disappears, but restarts also erase active sessions and the shared metadata cache.
 
-For durable friend testing, use either a host with a persistent volume mounted at `/var/lib/saville` or a small VM running `docker compose`. The code does not require a paid database, object store, login provider, or LLM during Phase 3.
+For durable friend testing, use a small paid container/VM with at least 2 GiB RAM and a persistent volume mounted at `/var/lib/saville`. No paid database, object store, login provider, or LLM is required; the single container and its volume are the only mandatory hosted resources.
 
 ## Storage behavior
 
@@ -141,7 +160,7 @@ Saville does not add product analytics, user accounts, email addresses, or a dev
 ## Operational checks
 
 - `/api/health` is a lightweight liveness response.
-- `/api/ready` verifies the SQLite database is writable and the bundled frontend exists.
+- `/api/ready` verifies the SQLite database is writable, the bundled frontend exists, and advertises safe upload/event/concurrency limits for deployment certification.
 - The container health check calls `/api/ready` every 30 seconds.
 - Interrupted imports are marked failed at startup; the previous completed profile remains available and the visitor can retry.
 - If readiness fails, first check that `/var/lib/saville` exists and is writable by UID `10001`.
@@ -165,10 +184,11 @@ Certify the actual HTTPS URL before sharing it:
 
 ```bash
 python scripts/hosted_preflight.py https://your-app.example \
-  --operations-token "$SMP_OPERATIONS_TOKEN"
+  --operations-token "$SMP_OPERATIONS_TOKEN" \
+  --minimum-upload-mib 300
 ```
 
-The preflight verifies liveness, readiness, frontend delivery, security headers, an HttpOnly/SameSite/Secure cookie, disabled account connections, optional operator privacy output, and immediate deletion of the empty test session. It uploads no listening data.
+The preflight verifies liveness, readiness, at least 300 MiB of configured upload capacity, frontend delivery, security headers, an HttpOnly/SameSite/Secure cookie, disabled account connections, optional operator privacy output, and immediate deletion of the empty test session. It uploads no listening data; the real archive must still be tested once to validate the provider's edge proxy.
 
 Use a free uptime monitor against `/api/ready` every five to fifteen minutes. Alert on non-200 responses, but do not put the operator token in an external monitor. Keep provider access-log retention short and document that infrastructure providers may still process IP addresses even though Saville itself does not create an analytics identity.
 
