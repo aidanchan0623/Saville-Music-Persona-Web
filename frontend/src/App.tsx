@@ -2,6 +2,7 @@ import { Menu, Music2, X } from "lucide-react";
 import type { CSSProperties } from "react";
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "./api/client";
+import type { FileUploadProgress } from "./api/client";
 import { pollChainedJob, pollTakeoutImport, runExclusiveOperation } from "./api/takeoutImport";
 import { GlowPanel } from "./components/GlowPanel";
 import { DesktopSidebar } from "./components/navigation/DesktopSidebar";
@@ -40,6 +41,16 @@ function getHistoryPage(): Page {
 function normalisePath(pathname: string) {
   if (!pathname || pathname === "/") return "/";
   return pathname.replace(/\/+$/, "").toLowerCase();
+}
+
+function uploadProgressMessage(service: "Google Takeout" | "Spotify", file: File, progress: FileUploadProgress) {
+  const megabytes = (bytes: number) => `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  if (progress.percent >= 100) {
+    return `${service} upload sent (${megabytes(file.size)}). Railway is securely staging it before analysis...`;
+  }
+  const speed = progress.bytesPerSecond > 0 ? ` · ${megabytes(progress.bytesPerSecond)}/s` : "";
+  const eta = progress.etaSeconds !== null ? ` · about ${Math.max(1, Math.ceil(progress.etaSeconds))}s left` : "";
+  return `Uploading ${file.name} from ${service}: ${progress.percent}% · ${megabytes(progress.loadedBytes)} / ${megabytes(progress.totalBytes)}${speed}${eta}`;
 }
 
 export default function App() {
@@ -331,7 +342,12 @@ export default function App() {
       importAbortControllerRef.current = controller;
       setMessage(`Uploading ${file.name} from Google Takeout...`);
       try {
-        const queued = await api.importTakeout(file, controller.signal);
+        const queued = await api.importTakeout(
+          file,
+          controller.signal,
+          (progress) => setMessage(uploadProgressMessage("Google Takeout", file, progress)),
+        );
+        setMessage("Google Takeout upload stored. Starting analysis...");
         const result = await pollTakeoutImport(
           (signal) => api.takeoutImportStatus(queued.jobId, signal),
           {
@@ -379,7 +395,12 @@ export default function App() {
       importAbortControllerRef.current = controller;
       setMessage(`Uploading ${file.name} from Spotify...`);
       try {
-        const queued = await api.importSpotifyHistory(file, controller.signal);
+        const queued = await api.importSpotifyHistory(
+          file,
+          controller.signal,
+          (progress) => setMessage(uploadProgressMessage("Spotify", file, progress)),
+        );
+        setMessage("Spotify upload stored. Starting analysis...");
         const result = await pollTakeoutImport(
           (signal) => api.spotifyHistoryImportStatus(queued.jobId, signal),
           {

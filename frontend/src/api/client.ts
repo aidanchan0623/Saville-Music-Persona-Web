@@ -33,6 +33,14 @@ import type {
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "/api";
 
+export interface FileUploadProgress {
+  loadedBytes: number;
+  totalBytes: number;
+  percent: number;
+  bytesPerSecond: number;
+  etaSeconds: number | null;
+}
+
 function paramsWithSource(source: MusicSource = "youtube", values: Record<string, string | null | undefined> = {}) {
   const params = new URLSearchParams({ source });
   for (const [key, value] of Object.entries(values)) {
@@ -91,6 +99,69 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   throw new Error("The server stayed unavailable after several safe retries.");
 }
 
+function uploadFile<T>(path: string, file: File, signal?: AbortSignal, onProgress?: (progress: FileUploadProgress) => void): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const form = new FormData();
+    const startedAt = performance.now();
+    form.append("file", file);
+
+    const abort = () => xhr.abort();
+    const cleanup = () => signal?.removeEventListener("abort", abort);
+
+    if (signal?.aborted) {
+      reject(new DOMException("The upload was cancelled.", "AbortError"));
+      return;
+    }
+    signal?.addEventListener("abort", abort, { once: true });
+
+    xhr.open("POST", `${API_BASE}${path}`);
+    xhr.withCredentials = true;
+    xhr.upload.onprogress = (event) => {
+      const totalBytes = event.lengthComputable && event.total > 0 ? event.total : file.size;
+      const elapsedSeconds = Math.max((performance.now() - startedAt) / 1000, 0.001);
+      const bytesPerSecond = event.loaded / elapsedSeconds;
+      const remainingBytes = Math.max(0, totalBytes - event.loaded);
+      onProgress?.({
+        loadedBytes: event.loaded,
+        totalBytes,
+        percent: totalBytes > 0 ? Math.min(100, Math.round((event.loaded / totalBytes) * 100)) : 0,
+        bytesPerSecond,
+        etaSeconds: bytesPerSecond > 0 && remainingBytes > 0 ? remainingBytes / bytesPerSecond : null,
+      });
+    };
+    xhr.onload = () => {
+      cleanup();
+      let data: unknown;
+      try {
+        data = JSON.parse(xhr.responseText);
+      } catch {
+        data = null;
+      }
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(data as T);
+        return;
+      }
+      const detail = data && typeof data === "object" && "detail" in data ? (data as { detail?: string | { detail?: string; error?: string } }).detail : undefined;
+      let message = `${xhr.status} ${xhr.statusText}`.trim();
+      if (typeof detail === "string") message = detail;
+      else if (detail?.detail) message = detail.detail;
+      else if (detail?.error) message = detail.error;
+      reject(new Error(hostedSafeHttpMessage(xhr.status, message)));
+    };
+    xhr.onerror = () => {
+      cleanup();
+      reject(new Error("The upload connection was interrupted. Your file is still on your device; retry when the connection is stable."));
+    };
+    xhr.onabort = () => {
+      cleanup();
+      reject(new DOMException("The upload was cancelled.", "AbortError"));
+    };
+    onProgress?.({ loadedBytes: 0, totalBytes: file.size, percent: 0, bytesPerSecond: 0, etaSeconds: null });
+    xhr.send(form);
+  });
+}
+
 async function analyticsRequest<T>(path: string, init?: RequestInit): Promise<T> {
   const envelope = await request<AnalyticsEnvelope<T>>(path, init);
   if (envelope.apiSchemaVersion !== 1) throw new Error("This analytics response uses an unsupported contract version. Refresh or re-import your data.");
@@ -129,40 +200,12 @@ export const api = {
     }),
   refreshStatus: (jobId: string, signal?: AbortSignal) =>
     request<RefreshStatus>(`/data/refresh/${encodeURIComponent(jobId)}`, { signal }),
-  importTakeout: async (file: File, signal?: AbortSignal) => {
-    const form = new FormData();
-    form.append("file", file);
-    const response = await fetch(`${API_BASE}/data/import-takeout`, { method: "POST", body: form, signal, credentials: "include" });
-    if (!response.ok) {
-      let message = `${response.status} ${response.statusText}`;
-      try {
-        const data = await response.json();
-        message = data.detail?.detail || data.detail?.error || message;
-      } catch {
-        // Keep HTTP status message.
-      }
-      throw new Error(hostedSafeHttpMessage(response.status, message));
-    }
-    return response.json() as Promise<TakeoutImportQueued>;
-  },
+  importTakeout: (file: File, signal?: AbortSignal, onProgress?: (progress: FileUploadProgress) => void) =>
+    uploadFile<TakeoutImportQueued>("/data/import-takeout", file, signal, onProgress),
   takeoutImportStatus: (jobId: string, signal?: AbortSignal) =>
     request<TakeoutImportStatus>(`/data/import-takeout/${encodeURIComponent(jobId)}`, { signal }),
-  importSpotifyHistory: async (file: File, signal?: AbortSignal) => {
-    const form = new FormData();
-    form.append("file", file);
-    const response = await fetch(`${API_BASE}/data/import-spotify-history`, { method: "POST", body: form, signal, credentials: "include" });
-    if (!response.ok) {
-      let message = `${response.status} ${response.statusText}`;
-      try {
-        const data = await response.json();
-        message = data.detail?.detail || data.detail?.error || message;
-      } catch {
-        // Keep HTTP status message.
-      }
-      throw new Error(hostedSafeHttpMessage(response.status, message));
-    }
-    return response.json() as Promise<TakeoutImportQueued>;
-  },
+  importSpotifyHistory: (file: File, signal?: AbortSignal, onProgress?: (progress: FileUploadProgress) => void) =>
+    uploadFile<TakeoutImportQueued>("/data/import-spotify-history", file, signal, onProgress),
   spotifyHistoryImportStatus: (jobId: string, signal?: AbortSignal) =>
     request<TakeoutImportStatus>(`/data/import-spotify-history/${encodeURIComponent(jobId)}`, { signal }),
   startDurationEnrichment: () => request<DurationEnrichmentStatus>("/data/duration-enrichment", { method: "POST", body: "{}" }),

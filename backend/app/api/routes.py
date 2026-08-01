@@ -131,6 +131,8 @@ from app.services.ytmusic_service import YTMusicService
 from app.session import current_session_id, current_session_namespace, is_shared_cache_key
 
 
+UPLOAD_COPY_CHUNK_BYTES = 8 * 1024 * 1024
+
 router = APIRouter(prefix="/api")
 repo = JsonRepository(
     settings.db_path,
@@ -1205,7 +1207,7 @@ async def import_takeout(file: UploadFile = File(...)) -> TakeoutImportQueuedRes
     file_size = 0
     try:
         with upload_path.open("wb") as destination:
-            while chunk := await file.read(1024 * 1024):
+            while chunk := await file.read(UPLOAD_COPY_CHUNK_BYTES):
                 file_size += len(chunk)
                 if file_size > settings.effective_upload_limit_bytes:
                     raise HTTPException(
@@ -1468,7 +1470,7 @@ async def import_spotify_history(file: UploadFile = File(...)) -> TakeoutImportQ
     file_size = 0
     try:
         with upload_path.open("wb") as destination:
-            while chunk := await file.read(1024 * 1024):
+            while chunk := await file.read(UPLOAD_COPY_CHUNK_BYTES):
                 file_size += len(chunk)
                 if file_size > settings.effective_upload_limit_bytes:
                     raise HTTPException(
