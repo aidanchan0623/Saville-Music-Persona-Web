@@ -47,13 +47,35 @@ function hostedSafeHttpMessage(status: number, message: string) {
     : message;
 }
 
+const TRANSIENT_GATEWAY_STATUSES = new Set([502, 503, 504]);
+
+function retryDelay(attempt: number) {
+  return new Promise((resolve) => globalThis.setTimeout(resolve, Math.min(4000, 500 * 2 ** attempt)));
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE}${path}`, {
-    ...init,
-    credentials: "include",
-    headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
-  });
-  if (!response.ok) {
+  const method = (init?.method ?? "GET").toUpperCase();
+  const attempts = method === "GET" || method === "HEAD" ? 6 : 1;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    let response: Response;
+    try {
+      response = await fetch(`${API_BASE}${path}`, {
+        ...init,
+        credentials: "include",
+        headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
+      });
+    } catch (error) {
+      if (attempt + 1 < attempts) {
+        await retryDelay(attempt);
+        continue;
+      }
+      throw error;
+    }
+    if (response.ok) return response.json() as Promise<T>;
+    if (TRANSIENT_GATEWAY_STATUSES.has(response.status) && attempt + 1 < attempts) {
+      await retryDelay(attempt);
+      continue;
+    }
     let message = `${response.status} ${response.statusText}`;
     try {
       const data = await response.json();
@@ -66,7 +88,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     }
     throw new Error(hostedSafeHttpMessage(response.status, message));
   }
-  return response.json() as Promise<T>;
+  throw new Error("The server stayed unavailable after several safe retries.");
 }
 
 async function analyticsRequest<T>(path: string, init?: RequestInit): Promise<T> {

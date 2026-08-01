@@ -428,7 +428,7 @@ export default function App() {
           intervalMs: 1500,
           timeoutMs: 30 * 60 * 1000,
           networkFailureLimit: 12,
-          batchDelayMs: 4000,
+          batchDelayMs: 6000,
           onStatus: (status) => setMessage(`${status.message} (${status.progress}%)`),
           onBatchComplete: async (status) => {
             await loadAnalysis("youtube");

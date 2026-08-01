@@ -102,7 +102,7 @@ class Settings:
             int(
                 os.getenv(
                     "SMP_DURATION_PUBLIC_BATCH_LIMIT",
-                    "25" if self.anonymous_mode else "100",
+                    "10" if self.anonymous_mode else "100",
                 )
             ),
         )
