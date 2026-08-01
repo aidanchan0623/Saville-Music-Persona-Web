@@ -200,14 +200,17 @@ export default function App() {
       return;
     }
     void loadAnalysis(source).catch((error) => {
+      const failureMessage = error instanceof Error
+        ? error.message
+        : source === "spotify"
+          ? "Upload Spotify history or connect Spotify in Settings."
+          : "YouTube Music analysis could not be loaded.";
+      if (/temporarily busy|stayed unavailable|saved progress will resume|backend restarted/i.test(failureMessage)) {
+        setMessage(null);
+        return;
+      }
       clearAnalysis();
-      setMessage(
-        error instanceof Error
-          ? error.message
-          : source === "spotify"
-            ? "Upload Spotify history or connect Spotify in Settings."
-            : "YouTube Music analysis could not be loaded.",
-      );
+      setMessage(failureMessage);
     });
   }, [source, sessionReady]);
 
