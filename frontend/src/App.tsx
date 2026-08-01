@@ -446,7 +446,7 @@ export default function App() {
         // Duration repair is optional background work. A transient hosted
         // gateway interruption must not leave a scary banner over analysis
         // that has already loaded successfully and remains fully usable.
-        setMessage(/temporarily busy|stayed unavailable|saved progress will resume/i.test(failureMessage) ? null : failureMessage);
+        setMessage(/temporarily busy|stayed unavailable|saved progress will resume|backend restarted/i.test(failureMessage) ? null : failureMessage);
       }
     } finally {
       if (durationAbortControllerRef.current === controller) durationAbortControllerRef.current = null;

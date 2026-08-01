@@ -103,6 +103,28 @@ test("chained polling retries a transient batch-start gateway failure", async ()
   assert.equal(startCalls, 4);
 });
 
+test("chained polling resumes a durable batch after a backend restart", async () => {
+  const starts = [
+    { ...status("queued"), continueQueued: false },
+    { ...status("complete"), continueQueued: false },
+  ];
+  const responses = [
+    { ...status("failed", "The backend restarted"), errorCode: "backend_restarted" },
+  ];
+  let startCalls = 0;
+  const result = await pollChainedJob(async () => {
+    startCalls += 1;
+    return starts.shift() ?? { ...status("complete"), continueQueued: false };
+  }, async () => responses.shift() ?? { ...status("complete"), continueQueued: false }, {
+    signal: new AbortController().signal,
+    intervalMs: 1,
+    batchDelayMs: 1,
+    timeoutMs: 100,
+  });
+  assert.equal(result.status, "complete");
+  assert.equal(startCalls, 2);
+});
+
 test("polling exposes a failed job and stops", async () => {
   await assert.rejects(
     pollTakeoutImport(async () => status("failed", "Rebuild failed safely."), {

@@ -116,16 +116,29 @@ export async function pollChainedJob<T extends ChainedJob>(
       }
     }
     if (!queued) break;
-    const batch = queued.status === "complete"
-      ? queued
-      : await pollTakeoutImport(getStatus, {
-          signal,
-          timeoutMs: Math.max(1, timeoutMs - (Date.now() - startedAt)),
-          intervalMs,
-          networkFailureLimit,
-          onStatus,
-        });
+    let batch: T;
+    try {
+      batch = queued.status === "complete"
+        ? queued
+        : await pollTakeoutImport(getStatus, {
+            signal,
+            timeoutMs: Math.max(1, timeoutMs - (Date.now() - startedAt)),
+            intervalMs,
+            networkFailureLimit,
+            onStatus,
+          });
+    } catch (error) {
+      if (error instanceof Error && /\(backend_restarted\)$/.test(error.message)) {
+        await abortableDelay(batchDelayMs, signal);
+        continue;
+      }
+      throw error;
+    }
     if (batch.status === "failed") {
+      if (batch.errorCode === "backend_restarted") {
+        await abortableDelay(batchDelayMs, signal);
+        continue;
+      }
       throw new Error(`${batch.message}${batch.errorCode ? ` (${batch.errorCode})` : ""}`);
     }
     await onBatchComplete?.(batch);
