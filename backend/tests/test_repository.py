@@ -43,6 +43,15 @@ def test_cached_json_tracks_batch_writes_and_deletes(tmp_path: Path) -> None:
     repository.save_json_batch({"normalised": {"version": 2}}, delete_keys=["analysis"])
 
     assert repository.load_json_cached("normalised") == {"version": 2}
+
+
+def test_runtime_metrics_are_atomic_and_session_summary_is_aggregate(tmp_path: Path) -> None:
+    repository = JsonRepository(tmp_path / "metrics.db")
+    repository.increment_runtime_metric("reports.accepted")
+    repository.increment_runtime_metric("reports.accepted", 2)
+    assert repository.runtime_metrics_snapshot() == {"reports.accepted": 3}
+    assert repository.anonymous_session_summary() == {"active": 0, "expired": 0}
+    assert repository.database_size_bytes() > 0
     assert repository.load_json_cached("analysis") is None
 
 

@@ -7,6 +7,8 @@ backend/.venv/
 # Build output
 dist/
 frontend/dist/
+frontend/playwright-report/
+frontend/test-results/
 build/
 
 # Python

@@ -1,7 +1,7 @@
 {
   "name": "saville-music-persona-web",
   "private": true,
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Anonymous hosted music-history analysis for Google Takeout and Spotify exports.",
   "scripts": {
     "setup": "powershell -ExecutionPolicy Bypass -File ./scripts/setup_windows.ps1",
@@ -9,6 +9,7 @@
     "frontend:dev": "npm.cmd --prefix frontend run dev",
     "frontend:build": "npm.cmd --prefix frontend run build",
     "frontend:lint": "npm.cmd --prefix frontend run lint",
+    "frontend:test:responsive": "npm.cmd --prefix frontend run test:responsive",
     "backend:test": "python -m pytest backend/tests",
     "backend:dev": "python -m uvicorn app.main:app --app-dir backend --reload --host 127.0.0.1 --port 8000",
     "hosted:build": "docker build -t saville-music-persona-web:local .",

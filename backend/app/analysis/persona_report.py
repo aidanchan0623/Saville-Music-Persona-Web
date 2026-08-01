@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from datetime import date
 from typing import Any
 
 from app.analysis.music_character import character_payload, personality_catalogue
@@ -17,13 +18,14 @@ def build_persona_report_evidence(
     normalised: dict[str, Any],
     timezone_name: str,
     period_key: str = REPORT_PERIOD,
+    today: date | None = None,
 ) -> dict[str, Any]:
     """Build every report fact from the same canonical period services."""
 
     # Build the expensive period analytics once.  Before this shared profile,
     # one report independently rebuilt the same 365-day taste and ranking data
     # through Overview, Character, Taste DNA, and Top endpoints.
-    profile = build_period_profile(normalised, period_key, timezone_name=timezone_name)
+    profile = build_period_profile(normalised, period_key, timezone_name=timezone_name, today=today)
     taste = taste_dna_payload(normalised, period_key, None, timezone_name, profile=profile)
     character = character_payload(normalised, period_key, timezone_name=timezone_name, profile=profile, taste=taste)
     overview = build_overview_response(

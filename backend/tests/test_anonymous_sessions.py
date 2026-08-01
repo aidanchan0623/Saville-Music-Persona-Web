@@ -69,7 +69,9 @@ def test_anonymous_middleware_issues_isolated_http_only_sessions(tmp_path: Path,
     assert "httponly" in first_status.headers["set-cookie"].casefold()
     assert first.cookies.get(routes.settings.session_cookie_name) != second.cookies.get(routes.settings.session_cookie_name)
     assert first.post("/api/auth/setup").status_code == 403
-    assert first.post("/api/auth/setup", headers={"Origin": "https://untrusted.example"}).json()["code"] == "origin_not_allowed"
+    untrusted = first.post("/api/auth/setup", headers={"Origin": "https://untrusted.example"})
+    assert untrusted.json()["code"] == "origin_not_allowed"
+    assert untrusted.headers["x-content-type-options"] == "nosniff"
     monkeypatch.setattr(routes.settings, "serve_frontend", True)
     assert first.post("/api/auth/setup", headers={"Origin": "http://testserver"}).json()["detail"]["code"] == "account_connections_disabled"
     assert first.get("/api/spotify/login", follow_redirects=False).status_code == 403
@@ -86,10 +88,47 @@ def test_health_probes_do_not_create_visitor_sessions(tmp_path: Path, monkeypatc
     health = client.get("/api/health")
     ready = client.get("/api/ready")
     assert health.status_code == 200
-    assert health.json()["version"] == "0.4.0"
+    assert health.json()["version"] == "0.5.0"
     assert ready.status_code == 200
     assert ready.json()["workerTopology"] == "single-process"
     assert client.cookies.get(routes.settings.session_cookie_name) is None
+
+
+def test_security_headers_and_private_operator_status(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repository = anonymous_repository(tmp_path / "operations.db")
+    monkeypatch.setattr(routes, "repo", repository)
+    monkeypatch.setattr(routes.settings, "deployment_mode", "anonymous")
+    monkeypatch.setattr(routes.settings, "operations_token", "operator-secret")
+    monkeypatch.setattr(routes.settings, "session_cookie_secure", False)
+    client = TestClient(app)
+
+    session = client.get("/api/session")
+    assert session.headers["cache-control"] == "no-store"
+    assert session.headers["x-content-type-options"] == "nosniff"
+    assert session.headers["referrer-policy"] == "no-referrer"
+    assert "frame-ancestors 'none'" in session.headers["content-security-policy"]
+
+    forbidden = TestClient(app).get("/api/ops/status")
+    assert forbidden.status_code == 403
+    assert forbidden.cookies.get(routes.settings.session_cookie_name) is None
+    status = TestClient(app).get(
+        "/api/ops/status",
+        headers={"X-Saville-Ops-Token": "operator-secret"},
+    )
+    assert status.status_code == 200
+    payload = status.json()
+    assert payload["version"] == "0.5.0"
+    assert payload["privacy"]["containsListeningHistory"] is False
+    assert payload["privacy"]["containsSessionIdentifiers"] is False
+    assert payload["counters"]["sessions.started"] == 1
+    assert "operator-secret" not in json.dumps(payload)
+
+
+def test_operator_status_is_not_discoverable_without_configuration(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(routes.settings, "operations_token", "")
+    response = TestClient(app).get("/api/ops/status")
+    assert response.status_code == 404
+    assert response.cookies.get(routes.settings.session_cookie_name) is None
 
 
 def test_import_worker_keeps_the_request_session_context(tmp_path: Path) -> None:

@@ -43,6 +43,15 @@ class JsonRepository:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS runtime_metrics (
+                    key TEXT PRIMARY KEY,
+                    value INTEGER NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
 
     def save_json(self, key: str, value: Any) -> str:
         key = self._storage_key(key)
@@ -258,6 +267,61 @@ class JsonRepository:
             return bool(row and row["checked_at"] == marker)
         except sqlite3.Error:
             return False
+
+    def increment_runtime_metric(self, key: str, amount: int = 1) -> None:
+        """Atomically increment an aggregate operational counter.
+
+        Runtime metrics are intentionally separate from visitor namespaces and
+        may only contain low-cardinality counter names, never listening data.
+        """
+        if not key or any(character not in "abcdefghijklmnopqrstuvwxyz0123456789_." for character in key):
+            raise ValueError("Runtime metric keys must use lowercase letters, digits, dots, and underscores")
+        updated_at = datetime.now(timezone.utc).isoformat()
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                "INSERT INTO runtime_metrics(key, value, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=value + excluded.value, updated_at=excluded.updated_at",
+                (key, int(amount), updated_at),
+            )
+
+    def runtime_metrics_snapshot(self) -> dict[str, int]:
+        with self.connect() as conn:
+            rows = conn.execute("SELECT key, value FROM runtime_metrics ORDER BY key").fetchall()
+        return {str(row["key"]): int(row["value"]) for row in rows}
+
+    def anonymous_session_summary(self, now: datetime | None = None) -> dict[str, int]:
+        """Count active/expired sessions without returning identifiers or payloads."""
+        current = now or datetime.now(timezone.utc)
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT value FROM json_cache WHERE key LIKE 'session:%:session_meta'"
+            ).fetchall()
+        active = 0
+        expired = 0
+        for row in rows:
+            try:
+                payload = json.loads(row["value"])
+                expires_at = datetime.fromisoformat(str(payload["expiresAt"]).replace("Z", "+00:00"))
+                if expires_at.tzinfo is None:
+                    expires_at = expires_at.replace(tzinfo=timezone.utc)
+                is_expired = expires_at <= current
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                is_expired = True
+            expired += int(is_expired)
+            active += int(not is_expired)
+        return {"active": active, "expired": expired}
+
+    def database_size_bytes(self) -> int:
+        """Return SQLite storage usage, including WAL sidecars, as one aggregate."""
+        paths = (self.db_path, Path(f"{self.db_path}-wal"), Path(f"{self.db_path}-shm"))
+        total = 0
+        for path in paths:
+            try:
+                total += path.stat().st_size
+            except OSError:
+                continue
+        return total
 
     def updated_at_for_storage_key(self, storage_key: str) -> datetime | None:
         with self.connect() as conn:

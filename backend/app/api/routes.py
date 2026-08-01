@@ -4,13 +4,14 @@ import copy
 import shutil
 import hashlib
 import json
+import secrets
 import time
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, File, HTTPException, Query, Response, UploadFile
+from fastapi import APIRouter, File, Header, HTTPException, Query, Response, UploadFile
 from fastapi.responses import RedirectResponse
 
 from app.analysis.duration import annotate_normalised_durations
@@ -97,6 +98,7 @@ from app.services.genre_enrichment_service import (
     seed_cache_from_source,
 )
 from app.services.ollama_service import OllamaService
+from app.services.operational_metrics import OperationalMetricsService
 from app.services.hosted_language_service import HostedLanguageService
 from app.services.recording_genre_service import MusicBrainzRecordingGenreService
 from app.services.report_generation_jobs import (
@@ -167,6 +169,7 @@ session_cleanup = SessionCleanupService(
     interval_seconds=settings.session_cleanup_interval_seconds,
     upload_ttl_hours=settings.session_ttl_hours,
 )
+operational_metrics = OperationalMetricsService(repo)
 
 
 def current_session_cleanup() -> SessionCleanupService:
@@ -179,6 +182,14 @@ def current_session_cleanup() -> SessionCleanupService:
             upload_ttl_hours=settings.session_ttl_hours,
         )
     return session_cleanup
+
+
+def current_operational_metrics() -> OperationalMetricsService:
+    """Follow a monkeypatched repository in tests without leaking visitor data."""
+    global operational_metrics
+    if operational_metrics.repo is not repo:
+        operational_metrics = OperationalMetricsService(repo)
+    return operational_metrics
 
 
 def enforce_anonymous_upload_limit() -> None:
@@ -765,7 +776,7 @@ def health() -> dict[str, Any]:
     return {
         "ok": True,
         "app": "Saville Music Persona Web",
-        "version": "0.4.0",
+        "version": "0.5.0",
         "mode": settings.deployment_mode,
         "time": datetime.now(timezone.utc).isoformat(),
     }
@@ -789,7 +800,36 @@ def readiness() -> dict[str, Any]:
         "database": "writable",
         "frontend": "bundled" if settings.serve_frontend else "external",
         "workerTopology": "single-process",
+        "security": {
+            "anonymousSessions": settings.anonymous_mode,
+            "secureCookies": settings.session_cookie_secure,
+            "allowedHostsRestricted": settings.allowed_hosts != ["*"],
+        },
     }
+
+
+@router.get("/ops/status")
+def operations_status(x_saville_ops_token: str | None = Header(default=None)) -> dict[str, Any]:
+    """Return aggregate runtime health only when an operator token is configured."""
+    if not settings.operations_token:
+        raise HTTPException(status_code=404, detail="Not Found")
+    supplied = x_saville_ops_token or ""
+    if not secrets.compare_digest(supplied, settings.operations_token):
+        raise HTTPException(status_code=403, detail={"error": "Operator token required", "code": "ops_forbidden"})
+    snapshot = current_operational_metrics().snapshot()
+    snapshot["version"] = "0.5.0"
+    snapshot["workerTopology"] = "single-process"
+    snapshot["limits"] = {
+        "maxUploadBytes": settings.effective_upload_limit_bytes,
+        "maxEvents": settings.anonymous_max_events,
+        "concurrentImports": settings.anonymous_max_concurrent_imports,
+        "concurrentReports": settings.anonymous_max_concurrent_reports,
+    }
+    snapshot["reportWriter"] = {
+        "configured": settings.hosted_llm_enabled,
+        "provider": settings.hosted_llm_provider,
+    }
+    return snapshot
 
 
 @router.get("/session", response_model=SessionStatusResponse)
@@ -805,6 +845,8 @@ def session_status() -> SessionStatusResponse:
         raise HTTPException(status_code=500, detail={"error": "Anonymous session unavailable", "code": "session_unavailable"})
     now = datetime.now(timezone.utc)
     existing = repo.load_json("session_meta")
+    if not isinstance(existing, dict):
+        current_operational_metrics().record("sessions.started")
     created_at = existing.get("createdAt") if isinstance(existing, dict) else now.isoformat()
     stored_expiry = existing.get("expiresAt") if isinstance(existing, dict) else None
     try:
@@ -850,6 +892,7 @@ def delete_session(response: Response) -> SessionDeleteResponse:
             },
         )
     deleted = current_session_cleanup().purge_namespace(namespace)
+    current_operational_metrics().record("sessions.deleted")
     response.delete_cookie(
         key=settings.session_cookie_name,
         path="/",
@@ -2289,6 +2332,10 @@ def build_report(request: ReportRequest) -> PersonaReportResponse:
         cache_key=report_cache_key,
     )
     validated = PersonaReportResponse.model_validate(payload)
+    generation_source = str((payload.get("generation") or {}).get("source") or "")
+    current_operational_metrics().record(
+        "reports.hosted_writer" if generation_source == "hosted-llm" else "reports.fallback"
+    )
     repo.save_json(report_cache_key, payload)
     save_persona_report_pointer(source, request.mode, analytics_fingerprint, report_cache_key, generated_at, period)
     return validated

@@ -51,6 +51,9 @@ class Settings:
             30,
             int(os.getenv("SMP_SESSION_CLEANUP_INTERVAL_SECONDS", "300")),
         )
+        self.operations_token = os.getenv("SMP_OPERATIONS_TOKEN", "").strip()
+        configured_hosts = [value.strip() for value in os.getenv("SMP_ALLOWED_HOSTS", "*").split(",") if value.strip()]
+        self.allowed_hosts = configured_hosts or ["*"]
         self.anonymous_max_upload_bytes = max(
             1024 * 1024,
             int(os.getenv("SMP_ANONYMOUS_MAX_UPLOAD_BYTES", str(100 * 1024 * 1024))),

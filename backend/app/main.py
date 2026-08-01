@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from app.api import routes
 from app.config import settings
@@ -14,10 +15,12 @@ from app.session import generate_session_id, reset_current_session, set_current_
 
 app = FastAPI(
     title="Saville Music Persona Web API",
-    version="0.4.0",
+    version="0.5.0",
     description="Anonymous hosted music-history analysis for Google Takeout and Spotify exports.",
 )
 logger = logging.getLogger("saville.session_cleanup")
+
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.allowed_hosts)
 
 app.add_middleware(
     CORSMiddleware,
@@ -34,7 +37,7 @@ async def anonymous_session_boundary(request: Request, call_next):
     is_api_request = request.url.path == "/api" or request.url.path.startswith("/api/")
     if not settings.anonymous_mode or not is_api_request:
         return await call_next(request)
-    if request.url.path in {"/api/health", "/api/ready"}:
+    if request.url.path in {"/api/health", "/api/ready", "/api/ops/status"}:
         return await call_next(request)
     origin = request.headers.get("origin")
     same_origin = bool(origin and origin.rstrip("/") == str(request.base_url).rstrip("/"))
@@ -62,7 +65,8 @@ async def anonymous_session_boundary(request: Request, call_next):
     try:
         response = await call_next(request)
         try:
-            routes.current_session_cleanup().cleanup_if_due(exclude={f"session:{session_id}"})
+            cleanup = routes.current_session_cleanup().cleanup_if_due(exclude={f"session:{session_id}"})
+            routes.current_operational_metrics().record_cleanup(cleanup)
         except Exception:  # noqa: BLE001
             logger.exception("Anonymous session cleanup failed; the request itself remains valid.")
     finally:
@@ -79,6 +83,28 @@ async def anonymous_session_boundary(request: Request, call_next):
             path="/",
         )
     response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.middleware("http")
+async def hosted_security_boundary(request: Request, call_next):
+    """Apply launch-safe browser headers without blocking provider artwork."""
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data: blob: https:; connect-src 'self'; font-src 'self' data:; "
+        "object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; "
+        "worker-src 'self' blob:"
+    )
+    if request.url.path == "/api" or request.url.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-store"
+    if request.url.scheme == "https" or request.headers.get("x-forwarded-proto", "").casefold() == "https":
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    routes.current_operational_metrics().record_mutation(request.method, request.url.path, response.status_code)
     return response
 
 app.include_router(routes.router)

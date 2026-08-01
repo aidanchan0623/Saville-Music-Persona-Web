@@ -65,6 +65,8 @@ SMP_SERVE_FRONTEND=true
 SMP_DATA_DIR=/var/lib/saville
 SMP_SESSION_COOKIE_SECURE=true
 SMP_SESSION_COOKIE_SAMESITE=lax
+SMP_ALLOWED_HOSTS=your-app.example
+SMP_OPERATIONS_TOKEN=generate-a-long-random-secret
 WEB_CONCURRENCY=1
 ```
 
@@ -144,6 +146,32 @@ Saville does not add product analytics, user accounts, email addresses, or a dev
 - Interrupted imports are marked failed at startup; the previous completed profile remains available and the visitor can retry.
 - If readiness fails, first check that `/var/lib/saville` exists and is writable by UID `10001`.
 
-## What Phase 3 does not include
+## Phase 5 observability and launch hardening
 
-Phase 4 adds an optional hosted LLM adapter and credential-free MusicBrainz/Cover Art Archive enrichment. Multi-replica scaling and production analytics/alerting remain Phase 5 work.
+Saville does not turn listening history into developer analytics. The private operator endpoint is disabled unless `SMP_OPERATIONS_TOKEN` is non-empty. Call it with a header, not a query string:
+
+```bash
+curl --fail --header "X-Saville-Ops-Token: $SMP_OPERATIONS_TOKEN" \
+  https://your-app.example/api/ops/status
+```
+
+The response contains only service uptime, SQLite byte size, counts of active/expired anonymous sessions, configured capacity limits, report-writer availability, and aggregate lifecycle counters such as accepted imports and deleted sessions. It contains no cookie value, session hint, IP address, user agent, filename, title, artist, listening event, analysis, or report text. Keep the operator token in the hosting platform's secret store and rotate it if it is exposed.
+
+Set `SMP_ALLOWED_HOSTS` to the public hostname (comma-separated if a provider has more than one legitimate hostname). The default `*` remains convenient for local containers but should not be used for the public test. Phase 5 also adds `nosniff`, no-referrer, permissions, frame, and content-security policies; API responses use `Cache-Control: no-store`; HTTPS responses use HSTS.
+
+CI runs responsive Chromium acceptance checks at phone, tablet, and desktop sizes. It confirms the anonymous Settings screen and both import controls fit without horizontal overflow and that navigation remains usable. These are layout gates, not a replacement for one real-device pass on iOS Safari and Android Chrome.
+
+Certify the actual HTTPS URL before sharing it:
+
+```bash
+python scripts/hosted_preflight.py https://your-app.example \
+  --operations-token "$SMP_OPERATIONS_TOKEN"
+```
+
+The preflight verifies liveness, readiness, frontend delivery, security headers, an HttpOnly/SameSite/Secure cookie, disabled account connections, optional operator privacy output, and immediate deletion of the empty test session. It uploads no listening data.
+
+Use a free uptime monitor against `/api/ready` every five to fifteen minutes. Alert on non-200 responses, but do not put the operator token in an external monitor. Keep provider access-log retention short and document that infrastructure providers may still process IP addresses even though Saville itself does not create an analytics identity.
+
+## Scaling boundary after Phase 5
+
+Phase 5 certifies the friend-group topology at exactly one process and one replica. It deliberately does not add user analytics or pretend SQLite plus in-process worker threads can safely autoscale. A future scale-out phase would require a distributed job queue, cross-instance capacity controls, and a multi-writer database before enabling additional replicas.

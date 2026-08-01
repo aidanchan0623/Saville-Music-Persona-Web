@@ -62,7 +62,12 @@ def test_persona_report_can_be_generated_for_current_month() -> None:
         today=date(2026, 7, 7),
     )
 
-    report = build_persona_report_evidence(normalised, "Asia/Kuala_Lumpur", "this_month")
+    report = build_persona_report_evidence(
+        normalised,
+        "Asia/Kuala_Lumpur",
+        "this_month",
+        today=date(2026, 7, 7),
+    )
 
     assert report["period"]["key"] == "this_month"
     assert report["topFive"]["songs"][0]["title"] == "July Song"

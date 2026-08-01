@@ -23,7 +23,9 @@ from app.services.takeout_service import TakeoutParseError, parse_takeout_file
 
 
 def json_history(count: int = 3) -> list[dict[str, object]]:
-    started_at = datetime(2026, 7, 10, 14, 0, 18, tzinfo=timezone.utc)
+    # Keep endpoint fixtures inside the real current-month API window so this
+    # test remains valid across calendar boundaries.
+    started_at = datetime.now(timezone.utc) - timedelta(minutes=1)
     return [
         {
             "header": "YouTube Music",

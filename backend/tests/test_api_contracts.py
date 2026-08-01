@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from datetime import date
 from pydantic import ValidationError
 
 from app.analysis.insights import insights_payload
@@ -28,9 +29,10 @@ def fixture_normalised() -> dict:
 
 def test_envelope_projects_one_canonical_period_profile() -> None:
     normalised = fixture_normalised()
-    profile = build_period_profile(normalised, "this_month", timezone_name="Asia/Kuala_Lumpur")
-    overview = build_overview_response(normalised, "this_month", timezone_name="Asia/Kuala_Lumpur")
-    insights = insights_payload(normalised, "this_month", timezone_name="Asia/Kuala_Lumpur")
+    anchor = date(2026, 7, 7)
+    profile = build_period_profile(normalised, "this_month", timezone_name="Asia/Kuala_Lumpur", today=anchor)
+    overview = build_overview_response(normalised, "this_month", timezone_name="Asia/Kuala_Lumpur", today=anchor)
+    insights = insights_payload(normalised, "this_month", timezone_name="Asia/Kuala_Lumpur", today=anchor)
     envelope = analytics_envelope("youtube", profile, normalised, overview)
 
     assert envelope.apiSchemaVersion == 1

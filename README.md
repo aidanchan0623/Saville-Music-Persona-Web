@@ -139,7 +139,7 @@ Default URLs:
 - Frontend: `http://localhost:5173`
 - Backend: `http://localhost:8000`
 
-## Anonymous hosted mode (Phases 1-4)
+## Anonymous hosted mode (Phases 1-5)
 
 Set `SMP_DEPLOYMENT_MODE=anonymous` before the backend starts to switch from the single-user desktop runtime to cookie-isolated upload sessions. The browser first calls `/api/session`; the backend issues an opaque HTTP-only cookie, and all listening profiles, analytics, reports, and background-job state are transparently stored under that session namespace. Reusable public music metadata caches remain shared, but one visitor cannot read another visitor's listening profile. Canonical listening-event index keys are session-scoped as well, so two people may import the same event without a database collision.
 
@@ -169,6 +169,8 @@ SMP_ANONYMOUS_MAX_UPLOAD_BYTES=104857600
 SMP_ANONYMOUS_MAX_EVENTS=250000
 SMP_ANONYMOUS_UPLOADS_PER_HOUR=4
 SMP_ANONYMOUS_MAX_CONCURRENT_IMPORTS=2
+SMP_ALLOWED_HOSTS=your-app.example
+SMP_OPERATIONS_TOKEN=generate-a-long-random-secret
 SMP_CORS_ORIGINS=https://your-frontend.example
 SMP_FRONTEND_URL=https://your-frontend.example
 ```
@@ -185,7 +187,7 @@ docker compose up --build
 
 Open `http://localhost:8000` for a local production-container test. See [Hosted deployment](docs/HOSTED_DEPLOYMENT.md) for volume, HTTPS, health-check, privacy, and free-hosting trade-offs.
 
-Phases 1-3 establish isolation, deletion, expiry, resource controls, and a deployable single-instance runtime. Phase 4 adds automatic shared-catalogue enrichment, a bounded hosted report-writer adapter, asynchronous progress, and deterministic fallbacks. Phase 5 covers observability, responsive acceptance testing, and launch hardening.
+Phases 1-3 establish isolation, deletion, expiry, resource controls, and a deployable single-instance runtime. Phase 4 adds automatic shared-catalogue enrichment, a bounded hosted report-writer adapter, asynchronous progress, and deterministic fallbacks. Phase 5 adds privacy-preserving operator counters, host and browser security boundaries, mobile/tablet/desktop acceptance tests, and a deployment preflight that verifies deletion before a friend-group launch.
 
 ## Phase 4 metadata and report adapters
 
@@ -194,6 +196,18 @@ After a YouTube Takeout or Spotify history import, the web client automatically 
 Persona Report generation now runs as a bounded background job with visible progress. A server-only OpenAI-compatible provider may rewrite six prose fields from compact deterministic evidence; it never decides rankings, counts, genres, Musical Age, or personality. The API key is never sent to the browser. Per-session and global request budgets, provider timeout, output cap, concurrent-job cap, strict JSON validation, and a deterministic fallback prevent remote prose from blocking the product.
 
 See [Hosted deployment](docs/HOSTED_DEPLOYMENT.md#phase-4-optional-hosted-report-writer) for configuration and privacy details.
+
+## Phase 5 launch readiness
+
+The hosted build remains intentionally anonymous and single-instance. `/api/ops/status` is disabled unless `SMP_OPERATIONS_TOKEN` is configured; with the matching `X-Saville-Ops-Token` header it returns uptime, database size, active/expired session counts, capacity limits, and aggregate lifecycle counters. It cannot return session identifiers, network identifiers, filenames, tracks, artists, reports, or listening history.
+
+Every API response is non-cacheable, browser security headers are applied to the frontend and API, production hosts can be restricted with `SMP_ALLOWED_HOSTS`, and HTTPS responses enable HSTS. CI now launches the complete hosted application and tests anonymous importing controls at mobile, tablet, and desktop sizes. Before sharing a deployment, run:
+
+```powershell
+python scripts/hosted_preflight.py https://your-app.example --operations-token $env:SMP_OPERATIONS_TOKEN
+```
+
+The preflight creates an empty anonymous session, confirms account routes are disabled, checks cookie and security policy behavior, and deletes that session. It never uploads music data. Complete [the launch checklist](docs/LAUNCH_CHECKLIST.md) before inviting testers.
 
 ## Development commands
 
