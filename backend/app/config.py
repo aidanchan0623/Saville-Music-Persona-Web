@@ -93,6 +93,19 @@ class Settings:
         self.anonymous_max_concurrent_reports = max(1, int(os.getenv("SMP_ANONYMOUS_MAX_CONCURRENT_REPORTS", "2")))
         self.local_timezone = os.getenv("SMP_LOCAL_TIMEZONE", "Asia/Kuala_Lumpur")
         self.duration_enrichment_limit = int(os.getenv("SMP_DURATION_ENRICHMENT_LIMIT", "1000"))
+        # Public InnerTube duration lookups are sequential. Keep anonymous
+        # batches deliberately small so a free-tier host can checkpoint and
+        # rebuild before its process is recycled. Local installs retain the
+        # larger batch because they are not subject to hosted restarts.
+        self.duration_public_batch_limit = max(
+            1,
+            int(
+                os.getenv(
+                    "SMP_DURATION_PUBLIC_BATCH_LIMIT",
+                    "25" if self.anonymous_mode else "100",
+                )
+            ),
+        )
         self.youtube_data_api_key = os.getenv("YOUTUBE_DATA_API_KEY", "").strip()
         self.duration_enrichment_timeout_seconds = int(os.getenv("SMP_DURATION_ENRICHMENT_TIMEOUT_SECONDS", "300"))
         # Exact MusicBrainz lookups are rate-limited and checkpointed after
@@ -101,8 +114,12 @@ class Settings:
         self.genre_enrichment_limit = int(os.getenv("SMP_GENRE_ENRICHMENT_LIMIT", "100"))
         self.recording_genre_enrichment_limit = int(os.getenv("SMP_RECORDING_GENRE_ENRICHMENT_LIMIT", "60"))
         self.genre_enrichment_timeout_seconds = int(os.getenv("SMP_GENRE_ENRICHMENT_TIMEOUT_SECONDS", "300"))
-        self.release_year_enrichment_limit = int(os.getenv("SMP_RELEASE_YEAR_ENRICHMENT_LIMIT", "50"))
-        self.track_metadata_enrichment_limit = int(os.getenv("SMP_TRACK_METADATA_ENRICHMENT_LIMIT", "100"))
+        self.release_year_enrichment_limit = int(
+            os.getenv("SMP_RELEASE_YEAR_ENRICHMENT_LIMIT", "12" if self.anonymous_mode else "50")
+        )
+        self.track_metadata_enrichment_limit = int(
+            os.getenv("SMP_TRACK_METADATA_ENRICHMENT_LIMIT", "20" if self.anonymous_mode else "100")
+        )
         self.takeout_max_upload_bytes = int(os.getenv("SMP_TAKEOUT_MAX_UPLOAD_BYTES", str(512 * 1024 * 1024)))
         self.takeout_import_timeout_seconds = int(os.getenv("SMP_TAKEOUT_IMPORT_TIMEOUT_SECONDS", "1200"))
         self.refresh_timeout_seconds = int(os.getenv("SMP_REFRESH_TIMEOUT_SECONDS", "600"))

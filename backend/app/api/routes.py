@@ -503,9 +503,14 @@ def normalise_with_duration_cache(
         raw["album_image_cache_v1"] = album_cache
     if allow_artist_image_enrichment:
         try:
-            stats = ytmusic.enrich_artist_image_cache(raw, artist_cache, preferred_artists=preferred_artist_images)
+            stats = ytmusic.enrich_artist_image_cache(
+                raw,
+                artist_cache,
+                preferred_artists=preferred_artist_images,
+                checkpoint=lambda cache: repo.merge_json_dict("artist_image_cache_v2", cache),
+            )
             if stats.get("seeded") or stats.get("attempted") or stats.get("repaired"):
-                repo.save_json("artist_image_cache_v2", artist_cache)
+                repo.merge_json_dict("artist_image_cache_v2", artist_cache)
                 if warnings is not None:
                     warnings.append(
                         f"Artist image cache checked {stats['attempted']} artist(s), added {stats['added']} official image(s), and reused {stats['seeded']} library artist image(s)."
@@ -518,9 +523,14 @@ def normalise_with_duration_cache(
     if allow_album_image_enrichment:
         try:
             preferred_albums = preferred_album_image_targets(normalised)
-            stats = ytmusic.enrich_album_image_cache(raw, album_cache, preferred_albums=preferred_albums)
+            stats = ytmusic.enrich_album_image_cache(
+                raw,
+                album_cache,
+                preferred_albums=preferred_albums,
+                checkpoint=lambda cache: repo.merge_json_dict("album_image_cache_v1", cache),
+            )
             if stats.get("seeded") or stats.get("attempted"):
-                repo.save_json("album_image_cache_v1", album_cache)
+                repo.merge_json_dict("album_image_cache_v1", album_cache)
                 normalised = normalise_collection(raw)
                 apply_track_metadata_cache(normalised, track_metadata_cache)
                 if warnings is not None:
@@ -535,9 +545,14 @@ def normalise_with_duration_cache(
         normalised = annotate_normalised_durations(normalised, duration_cache)
     if allow_enrichment:
         try:
-            stats = ytmusic.enrich_duration_cache(normalised, duration_cache, settings.duration_enrichment_limit)
+            stats = ytmusic.enrich_duration_cache(
+                normalised,
+                duration_cache,
+                settings.duration_enrichment_limit,
+                checkpoint=lambda cache: repo.merge_json_dict("duration_cache", cache),
+            )
             if stats.get("attempted"):
-                repo.save_json("duration_cache", duration_cache)
+                repo.merge_json_dict("duration_cache", duration_cache)
                 normalised = annotate_normalised_durations(normalised, duration_cache)
                 if warnings is not None:
                     warnings.append(
@@ -568,7 +583,7 @@ def durable_genre_cache() -> dict[str, Any]:
         provider="spotify",
     )
     if prepared != stored:
-        repo.save_json("genre_metadata_cache", prepared)
+        repo.merge_json_dict("genre_metadata_cache", prepared)
     return prepared
 
 
@@ -1628,7 +1643,7 @@ def process_spotify_history_import(
 
 
 def process_duration_enrichment(coordinator: DurationEnrichmentCoordinator, deadline: float) -> None:
-    """Resolve exact video durations without making Takeout imports wait on upstream metadata."""
+    """Resolve exact video metadata in restart-safe, immediately useful batches."""
     cached_normalised = repo.load_json("normalised")
     if not isinstance(cached_normalised, dict) or not cached_normalised.get("tracks"):
         coordinator.fail("No listening profile is available to enrich yet. Import or refresh YouTube data first.", "duration_profile_missing")
@@ -1638,63 +1653,129 @@ def process_duration_enrichment(coordinator: DurationEnrichmentCoordinator, dead
     duration_cache = repo.load_json("duration_cache") or {}
     if not isinstance(duration_cache, dict):
         duration_cache = {}
-    stats = ytmusic.enrich_duration_cache(cached_normalised, duration_cache, settings.duration_enrichment_limit)
-    release_year_cache = repo.load_json("release_year_cache_v1") or {}
-    if not isinstance(release_year_cache, dict):
-        release_year_cache = {}
-    release_stats = ytmusic.enrich_release_year_cache(
-        cached_normalised,
-        release_year_cache,
-        settings.release_year_enrichment_limit,
-    )
-    track_metadata_cache = ensure_track_metadata_cache(repo.load_json("track_metadata_cache_v1") or {})
-    metadata_stats = ytmusic.enrich_track_metadata_cache(
-        cached_normalised,
-        track_metadata_cache,
-        settings.track_metadata_enrichment_limit,
-    )
-    coordinator.check_timeout(deadline)
-    if not stats.get("attempted") and not release_stats.get("attempted") and not metadata_stats.get("attempted"):
-        coordinator.stage("complete", "Track duration, identity metadata, and release-year coverage are already up to date.", **stats, releaseYearEnrichment=release_stats, trackMetadataEnrichment=metadata_stats)
-        return
 
-    coordinator.stage("rebuilding", "Applying resolved durations and rebuilding listening totals.", **stats)
-    # Refreshes can enrich artwork while a duration job is awaiting upstream
-    # metadata. Reload the current profile before saving so this background job
-    # applies its cache to the newest data instead of overwriting album covers
-    # and artist portraits with its older snapshot.
+    def update_duration_progress(completed: int, total: int, added: int) -> None:
+        fraction = completed / max(1, total)
+        coordinator.update_progress(
+            15 + round(fraction * 65),
+            f"Resolved or checked {completed} of {total} exact video duration(s); every result is saved.",
+            attempted=completed,
+            added=added,
+        )
+
+    stats = ytmusic.enrich_duration_cache(
+        cached_normalised,
+        duration_cache,
+        settings.duration_enrichment_limit,
+        checkpoint=lambda cache: repo.merge_json_dict("duration_cache", cache),
+        progress_callback=update_duration_progress,
+    )
+
+    # Rebuild listening time before doing slower release-year and artwork work.
+    # A Railway restart later in this job can no longer erase a completed
+    # duration batch or leave the UI at zero minutes.
+    coordinator.stage("rebuilding", "Applying saved durations and rebuilding listening totals.", **stats)
     latest_normalised = repo.load_json("normalised")
     if isinstance(latest_normalised, dict) and latest_normalised.get("tracks"):
         cached_normalised = latest_normalised
+    release_year_cache = repo.load_json("release_year_cache_v1") or {}
+    if not isinstance(release_year_cache, dict):
+        release_year_cache = {}
+    track_metadata_cache = ensure_track_metadata_cache(repo.load_json("track_metadata_cache_v1") or {})
     rebuilt_normalised = annotate_normalised_durations(cached_normalised, duration_cache)
+    apply_track_metadata_cache(rebuilt_normalised, track_metadata_cache)
+    rebuilt_normalised = apply_release_year_cache(rebuilt_normalised, release_year_cache)
+    apply_genre_cache(rebuilt_normalised, durable_genre_cache())
+    rebuilt_analysis = build_analysis(rebuilt_normalised)
+    if "coverage" not in rebuilt_analysis:
+        raise ValueError("duration rebuild produced an incomplete analysis")
+    repo.save_json_batch(
+        {"normalised": rebuilt_normalised, "analysis": rebuilt_analysis},
+        delete_keys=["latest_report", "recommendations"],
+        delete_prefixes=["persona_report:", "persona_report_pointer:", "overview_language:"],
+    )
+    clear_analytics_memory_caches()
+
+    coordinator.check_timeout(deadline)
+    raw = repo.load_json("raw") or {}
+    artwork_stats = {"seeded": 0, "attempted": 0, "added": 0, "failed": 0, "repaired": 0}
+    missing_artists = missing_artist_image_names(rebuilt_analysis, rebuilt_normalised)
+    if isinstance(raw, dict) and raw and missing_artists:
+        artist_cache = ensure_artist_image_cache_schema(repo.load_json("artist_image_cache_v2") or {})
+        artwork_stats = ytmusic.enrich_artist_image_cache(
+            raw,
+            artist_cache,
+            limit=min(10, len(missing_artists)),
+            preferred_artists=missing_artists,
+            checkpoint=lambda cache: repo.merge_json_dict("artist_image_cache_v2", cache),
+        )
+        # Artwork is attached during canonical normalization, so rebuild from
+        # the same raw events only when a missing portrait was actually checked.
+        if artwork_stats.get("attempted") or artwork_stats.get("seeded") or artwork_stats.get("repaired"):
+            repo.save_json("raw", raw)
+            rebuilt_normalised = normalise_collection(raw)
+            rebuilt_normalised = annotate_normalised_durations(rebuilt_normalised, duration_cache)
+            apply_track_metadata_cache(rebuilt_normalised, track_metadata_cache)
+            rebuilt_normalised = apply_release_year_cache(rebuilt_normalised, release_year_cache)
+            apply_genre_cache(rebuilt_normalised, durable_genre_cache())
+            rebuilt_analysis = build_analysis(rebuilt_normalised)
+            repo.save_json_batch(
+                {"raw": raw, "normalised": rebuilt_normalised, "analysis": rebuilt_analysis},
+                delete_keys=["latest_report", "recommendations"],
+                delete_prefixes=["persona_report:", "persona_report_pointer:", "overview_language:"],
+            )
+            clear_analytics_memory_caches()
+
+    if stats.get("remaining"):
+        coordinator.stage(
+            "complete",
+            f"Saved {stats['added']} duration(s), repaired {artwork_stats['added']} portrait(s), and updated listening time. {stats['remaining']} more track(s) are queued in the next safe batch.",
+            continueQueued=True,
+            **stats,
+        )
+        return
+
+    coordinator.check_timeout(deadline)
+    release_stats = ytmusic.enrich_release_year_cache(
+        rebuilt_normalised,
+        release_year_cache,
+        settings.release_year_enrichment_limit,
+    )
+    coordinator.check_timeout(deadline)
+    metadata_stats = ytmusic.enrich_track_metadata_cache(
+        rebuilt_normalised,
+        track_metadata_cache,
+        settings.track_metadata_enrichment_limit,
+    )
+
     apply_track_metadata_cache(rebuilt_normalised, track_metadata_cache)
     rebuilt_normalised = apply_release_year_cache(rebuilt_normalised, release_year_cache)
     apply_genre_cache(rebuilt_normalised, durable_genre_cache())
     sync_recording_catalog(rebuilt_normalised, "youtube")
     rebuilt_analysis = build_analysis(rebuilt_normalised)
     if "coverage" not in rebuilt_analysis:
-        raise ValueError("duration rebuild produced an incomplete analysis")
-    coordinator.check_timeout(deadline)
-    raw = repo.load_json("raw") or {}
-    if isinstance(raw, dict):
-        raw["release_year_cache_v1"] = release_year_cache
-        raw["track_metadata_cache_v1"] = track_metadata_cache
+        raise ValueError("metadata rebuild produced an incomplete analysis")
+    raw = raw if isinstance(raw, dict) else {}
+    raw["release_year_cache_v1"] = release_year_cache
+    raw["track_metadata_cache_v1"] = track_metadata_cache
+    repo.merge_json_dict("release_year_cache_v1", release_year_cache)
+    repo.merge_json_dict("track_metadata_cache_v1", track_metadata_cache)
     repo.save_json_batch(
-        {"duration_cache": duration_cache, "release_year_cache_v1": release_year_cache, "track_metadata_cache_v1": track_metadata_cache, "raw": raw, "normalised": rebuilt_normalised, "analysis": rebuilt_analysis},
+        {
+            "raw": raw,
+            "normalised": rebuilt_normalised,
+            "analysis": rebuilt_analysis,
+        },
         delete_keys=["latest_report", "recommendations"],
         delete_prefixes=["persona_report:", "persona_report_pointer:", "overview_language:"],
     )
     clear_analytics_memory_caches()
-    remaining_total = int(stats.get("remaining") or 0) + int(release_stats.get("remaining") or 0) + int(metadata_stats.get("remaining") or 0)
+    remaining_total = int(release_stats.get("remaining") or 0) + int(metadata_stats.get("remaining") or 0)
     remaining_note = f" {remaining_total} more track(s) remain queued for the next local batch." if remaining_total else ""
     coordinator.stage(
         "complete",
-        f"Resolved {stats['added']} track duration(s), {metadata_stats['added']} authoritative track metadata record(s), and {release_stats['added']} release year(s). Listening totals are updated.{remaining_note}",
-        # Duration lookups are cheap to resume automatically.  Release-year
-        # matching makes upstream searches and album reads, so leave additional
-        # metadata for the next explicit/background refresh instead of chaining
-        # an unbounded job on a laptop.
-        continueQueued=bool(stats.get("remaining")),
+        f"Resolved {stats['added']} track duration(s), {artwork_stats['added']} artist portrait(s), {metadata_stats['added']} authoritative track metadata record(s), and {release_stats['added']} release year(s). Listening totals are updated.{remaining_note}",
+        continueQueued=False,
         **stats,
         releaseYearEnrichment=release_stats,
         trackMetadataEnrichment=metadata_stats,
@@ -1758,7 +1839,7 @@ def process_genre_enrichment(coordinator: GenreEnrichmentCoordinator, deadline: 
         # Persist provider evidence after every resolved artist. If the laptop
         # sleeps or the backend restarts, the completed requests are still
         # available and will be reapplied on the next rebuild.
-        on_cache_update=lambda updated: repo.save_json("genre_metadata_cache", updated),
+        on_cache_update=lambda updated: repo.merge_json_dict("genre_metadata_cache", updated),
     )
     apply_genre_cache(working_normalised, cache)
     coordinator.stage(
@@ -1776,7 +1857,7 @@ def process_genre_enrichment(coordinator: GenreEnrichmentCoordinator, deadline: 
         limit=settings.recording_genre_enrichment_limit,
         deadline=resolution_deadline,
         metadata_cache=track_metadata_cache,
-        on_update=lambda: repo.save_json("track_metadata_cache_v1", track_metadata_cache),
+        on_update=lambda: repo.merge_json_dict("track_metadata_cache_v1", track_metadata_cache),
     )
     stats.update(recording_stats)
 
@@ -1798,10 +1879,10 @@ def process_genre_enrichment(coordinator: GenreEnrichmentCoordinator, deadline: 
     recording_catalog.sync_normalised(working_normalised, profile_source=recording_profile_source(resolved_source))
     rebuilt_analysis = build_analysis(working_normalised)
     after_coverage = genre_coverage_payload(rebuilt_analysis)
+    repo.merge_json_dict("genre_metadata_cache", cache)
+    repo.merge_json_dict("track_metadata_cache_v1", track_metadata_cache)
     repo.save_json_batch(
         {
-            "genre_metadata_cache": cache,
-            "track_metadata_cache_v1": track_metadata_cache,
             normalised_key: working_normalised,
             analysis_key: rebuilt_analysis,
         },

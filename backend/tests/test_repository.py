@@ -78,3 +78,18 @@ def test_anonymous_namespaces_isolate_profiles_but_share_music_metadata(tmp_path
     with session_scope(first_session):
         assert repository.load_json("normalised") == {"owner": "first"}
         assert repository.load_json_prefix("takeout_import_job:")["takeout_import_job:first"]["status"] == "complete"
+
+
+def test_shared_metadata_merge_preserves_parallel_cache_entries(tmp_path: Path) -> None:
+    repository = JsonRepository(tmp_path / "shared-merge.db")
+    first_stale_snapshot = {"items": {"artist-a": {"url": "a.jpg"}}, "aliases": {"a": "artist-a"}}
+    second_stale_snapshot = {"items": {"artist-b": {"url": "b.jpg"}}, "aliases": {"b": "artist-b"}}
+
+    repository.merge_json_dict("artist_image_cache_v2", first_stale_snapshot)
+    merged = repository.merge_json_dict("artist_image_cache_v2", second_stale_snapshot)
+
+    assert merged["items"] == {
+        "artist-a": {"url": "a.jpg"},
+        "artist-b": {"url": "b.jpg"},
+    }
+    assert merged["aliases"] == {"a": "artist-a", "b": "artist-b"}

@@ -71,6 +71,36 @@ class JsonRepository:
         self._remember(key, value, updated_at)
         return updated_at
 
+    def merge_json_dict(self, key: str, value: dict[str, Any]) -> dict[str, Any]:
+        """Atomically merge a reusable metadata cache without losing peers.
+
+        Anonymous visitors can enrich the same shared public-metadata cache at
+        the same time. Replacing the whole JSON object would let the last
+        writer erase another visitor's completed lookups, so shared caches use
+        a recursive merge inside one SQLite write transaction.
+        """
+        storage_key = self._storage_key(key)
+        updated_at = datetime.now(timezone.utc).isoformat()
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT value FROM json_cache WHERE key = ?", (storage_key,)).fetchone()
+            current = json.loads(row["value"]) if row else {}
+            if not isinstance(current, dict):
+                current = {}
+            merged = _merge_json_dicts(current, value)
+            conn.execute(
+                """
+                INSERT INTO json_cache(key, value, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    value = excluded.value,
+                    updated_at = excluded.updated_at
+                """,
+                (storage_key, json.dumps(merged, ensure_ascii=True, default=str), updated_at),
+            )
+        self._remember(storage_key, merged, updated_at)
+        return merged
+
     def save_json_batch(
         self,
         values: dict[str, Any],
@@ -369,3 +399,14 @@ class JsonRepository:
         namespace = self.namespace_resolver() if self.namespace_resolver else None
         marker = f"{namespace}:" if namespace else ""
         return key.removeprefix(marker) if marker else key
+
+
+def _merge_json_dicts(current: dict[str, Any], updates: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(current)
+    for key, value in updates.items():
+        existing = merged.get(key)
+        if isinstance(existing, dict) and isinstance(value, dict):
+            merged[key] = _merge_json_dicts(existing, value)
+        else:
+            merged[key] = value
+    return merged

@@ -6,7 +6,7 @@ import pytest
 
 from app.config import Settings
 from app.analysis.thumbnails import best_thumbnail_url
-from app.analysis.media import album_cache_failure, album_cache_set, album_id_key, album_name_artist_key, artist_id_key, artist_name_key
+from app.analysis.media import album_cache_failure, album_cache_set, album_id_key, album_name_artist_key, artist_cache_set, artist_id_key, artist_name_key
 from app.services.recommendations import dedupe_candidates
 from app.services.ytmusic_service import YTMusicService, friendly_auth_error, normalise_artist_name
 
@@ -56,6 +56,52 @@ def test_duration_enrichment_uses_public_client_and_retries_legacy_negative_cach
     assert fake.get_song_calls == ["played-often"]
     assert cache["played-often"]["duration_seconds"] == 242  # type: ignore[index]
     assert cache["played-often"]["status"] == "resolved"  # type: ignore[index]
+
+
+def test_duration_enrichment_checkpoints_each_hosted_lookup() -> None:
+    fake = FakeYTMusic(
+        song_pages={
+            "first": {"videoDetails": {"lengthSeconds": "180"}},
+            "second": {"videoDetails": {"lengthSeconds": "240"}},
+            "third": {"videoDetails": {"lengthSeconds": "300"}},
+        }
+    )
+    service = fake_service(fake)
+    service.settings.duration_public_batch_limit = 2
+    cache: dict[str, object] = {}
+    normalised = {
+        "tracks": [
+            {"video_id": "first", "duration_seconds": None},
+            {"video_id": "second", "duration_seconds": None},
+            {"video_id": "third", "duration_seconds": None},
+        ],
+        "play_events": [
+            {"video_id": "first"},
+            {"video_id": "second"},
+            {"video_id": "third"},
+        ],
+    }
+    checkpoints: list[set[str]] = []
+    progress: list[tuple[int, int, int]] = []
+
+    stats = service.enrich_duration_cache(
+        normalised,
+        cache,
+        limit=10,
+        checkpoint=lambda value: checkpoints.append(set(value)),
+        progress_callback=lambda completed, total, added: progress.append((completed, total, added)),
+    )
+
+    assert stats == {
+        "attempted": 2,
+        "added": 2,
+        "failed": 0,
+        "api_batches": 0,
+        "fallback_attempted": 2,
+        "remaining": 1,
+    }
+    assert checkpoints == [{"first"}, {"first", "second"}]
+    assert progress[-1] == (2, 2, 2)
 
 
 def test_duration_enrichment_verifies_unknown_exact_video_as_music() -> None:
@@ -401,6 +447,42 @@ def test_artist_image_enrichment_replaces_ambiguous_cached_gem_match() -> None:
     assert fake.get_artist_calls == ["UCBRh2Z_U1Lw9-YJ-XGZ8M2Q"]
     assert cache_record(cache, "G.E.M.")["url"] == "https://img.example/gem.jpg"
     assert "artist:UC-wrong-gem" not in cache["items"]
+
+
+def test_artist_image_enrichment_retries_legacy_curated_failure_once() -> None:
+    browse_id = "UCBRh2Z_U1Lw9-YJ-XGZ8M2Q"
+    fake = FakeYTMusic(
+        artist_pages={
+            browse_id: {
+                "artist": "G.E.M.",
+                "browseId": browse_id,
+                "thumbnails": [{"url": "https://img.example/gem-recovered.jpg", "width": 512, "height": 512}],
+            }
+        }
+    )
+    cache: dict[str, object] = {}
+    artist_cache_set(
+        cache,
+        "G.E.M.",
+        {
+            "schemaVersion": 2,
+            "mediaType": "artist",
+            "artist": "G.E.M.",
+            "browse_id": browse_id,
+            "url": None,
+            "thumbnails": [],
+            "failureReason": "artist_page_failed",
+            "retry_after": "2099-01-01T00:00:00+00:00",
+        },
+        browse_id,
+    )
+
+    stats = fake_service(fake).enrich_artist_image_cache({"history": [_history_artist("G.E.M.")]}, cache)
+
+    assert stats["attempted"] == 1
+    assert stats["added"] == 1
+    assert fake.get_artist_calls == [browse_id]
+    assert cache_record(cache, "G.E.M.")["url"] == "https://img.example/gem-recovered.jpg"
 
 
 def test_artist_image_enrichment_uses_verified_lane_8_channel() -> None:

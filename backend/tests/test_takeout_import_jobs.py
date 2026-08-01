@@ -20,6 +20,7 @@ from app.services.takeout_import_jobs import (
 )
 from app.services.duration_enrichment_jobs import DurationEnrichmentCoordinator
 from app.services.takeout_service import TakeoutParseError, parse_takeout_file
+from app.session import current_session_namespace, is_shared_cache_key, session_scope
 
 
 def json_history(count: int = 3) -> list[dict[str, object]]:
@@ -199,11 +200,19 @@ def test_duration_enrichment_rebuilds_cached_profile_without_reimport(tmp_path: 
     repository.save_json("normalised", normalised)
     repository.save_json("analysis", {"top_tracks": [{"title": "Old"}], "coverage": {}})
     monkeypatch.setattr(routes, "repo", repository)
-    monkeypatch.setattr(
-        routes.ytmusic,
-        "enrich_duration_cache",
-        lambda _normalised, cache, _limit: cache.update({"track": {"duration_seconds": 200, "duration_source": "test", "duration_confidence": "high"}}) or {"attempted": 1, "added": 1, "failed": 0, "api_batches": 0, "fallback_attempted": 0},
-    )
+    def enrich_duration(_normalised: dict[str, object], cache: dict[str, object], _limit: int, **kwargs: object) -> dict[str, int]:
+        cache.update({"track": {"duration_seconds": 200, "duration_source": "test", "duration_confidence": "high"}})
+        checkpoint = kwargs.get("checkpoint")
+        if callable(checkpoint):
+            checkpoint(cache)
+        progress = kwargs.get("progress_callback")
+        if callable(progress):
+            progress(1, 1, 1)
+        return {"attempted": 1, "added": 1, "failed": 0, "api_batches": 0, "fallback_attempted": 0, "remaining": 0}
+
+    monkeypatch.setattr(routes.ytmusic, "enrich_duration_cache", enrich_duration)
+    monkeypatch.setattr(routes.ytmusic, "enrich_release_year_cache", lambda *_args, **_kwargs: {"attempted": 0, "added": 0, "failed": 0, "remaining": 0})
+    monkeypatch.setattr(routes.ytmusic, "enrich_track_metadata_cache", lambda *_args, **_kwargs: {"attempted": 0, "added": 0, "failed": 0, "remaining": 0})
     coordinator = DurationEnrichmentCoordinator(repository, timeout_seconds=30)
 
     routes.process_duration_enrichment(coordinator, time.monotonic() + 30)
@@ -211,6 +220,36 @@ def test_duration_enrichment_rebuilds_cached_profile_without_reimport(tmp_path: 
     assert coordinator.status()["status"] == "complete"
     assert repository.load_json("normalised")["play_events"][0]["duration_seconds"] == 200
     assert "coverage" in repository.load_json("analysis")
+
+
+def test_anonymous_duration_job_recovers_lazily_after_backend_restart(tmp_path: Path) -> None:
+    repository = JsonRepository(
+        tmp_path / "anonymous-duration-restart.db",
+        namespace_resolver=current_session_namespace,
+        shared_key_predicate=is_shared_cache_key,
+    )
+    session_id = "a" * 64
+    with session_scope(session_id):
+        repository.save_json(
+            "duration_enrichment_job",
+            {
+                "jobId": "interrupted",
+                "status": "resolving",
+                "progress": 15,
+                "message": "working",
+                "errorCode": None,
+            },
+        )
+
+    # Construction has no request context and therefore cannot see a
+    # namespaced visitor job. The first poll must recover that exact namespace.
+    coordinator = DurationEnrichmentCoordinator(repository, timeout_seconds=30)
+    with session_scope(session_id):
+        recovered = coordinator.status()
+
+    assert recovered and recovered["status"] == "failed"
+    assert recovered["errorCode"] == "backend_restarted"
+    assert "Saved metadata was kept" in recovered["message"]
 
 
 def test_duration_enrichment_queues_the_next_safe_batch(tmp_path: Path) -> None:

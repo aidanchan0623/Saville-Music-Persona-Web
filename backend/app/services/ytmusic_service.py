@@ -50,6 +50,7 @@ ARTIST_BROWSE_ID_OVERRIDES = {
     "lane 8": "UCqjupXgFQVmnpYo-sJ47dHg",
     "周杰倫": "UCL2MDNdwEtV6aYUgNjFQGZA",
 }
+ARTIST_IMAGE_RESOLVER_VERSION = 2
 
 
 class YTMusicService:
@@ -206,11 +207,26 @@ class YTMusicService:
         path = raw_dir / "latest_raw_collection.json"
         path.write_text(json.dumps(raw, ensure_ascii=True, indent=2, default=str), encoding="utf-8")
 
-    def enrich_artist_image_cache(self, raw: dict[str, Any], artist_cache: dict[str, Any], limit: int = 25, preferred_artists: list[str] | None = None) -> dict[str, int]:
+    def enrich_artist_image_cache(
+        self,
+        raw: dict[str, Any],
+        artist_cache: dict[str, Any],
+        limit: int = 25,
+        preferred_artists: list[str] | None = None,
+        checkpoint: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict[str, int]:
         if limit <= 0:
             return {"seeded": 0, "attempted": 0, "added": 0, "failed": 0, "repaired": 0}
         artist_cache = ensure_artist_image_cache_schema(artist_cache)
         seeded = seed_artist_cache_from_library(raw, artist_cache)
+
+        def save_checkpoint() -> None:
+            raw["artist_image_cache_v2"] = artist_cache
+            if checkpoint:
+                checkpoint(artist_cache)
+
+        if seeded:
+            save_checkpoint()
         artist_targets = top_artist_targets(raw, preferred_artists=preferred_artists)
         if not artist_targets:
             raw["artist_image_cache_v2"] = artist_cache
@@ -231,9 +247,15 @@ class YTMusicService:
             cached = artist_cache_lookup(artist_cache, artist, artist_id)
             if cached and override_browse_id:
                 repaired += ensure_artist_cache_alias(cached, artist)
+            curated_retry_required = bool(
+                override_browse_id
+                and cached
+                and not artist_cache_has_thumbnail(cached)
+                and cached.get("resolver_version") != ARTIST_IMAGE_RESOLVER_VERSION
+            )
             # Replace an old ambiguous match when an exact, curated channel is
             # available.  Otherwise cache hits remain entirely offline.
-            if artist_cache_has_result(cached) and (not override_browse_id or cached.get("browse_id") == override_browse_id):
+            if artist_cache_has_result(cached) and not curated_retry_required and (not override_browse_id or cached.get("browse_id") == override_browse_id):
                 continue
             if attempted >= limit:
                 break
@@ -253,12 +275,16 @@ class YTMusicService:
                         try:
                             payload = yt.get_artist(str(matched_browse_id))
                         except Exception:
-                            artist_cache_set(artist_cache, artist, artist_cache_failure_entry(artist, matched_browse_id, "artist_page_failed"), matched_browse_id)
+                            failure_entry = artist_cache_failure_entry(artist, matched_browse_id, "artist_page_failed")
+                            failure_entry["resolver_version"] = ARTIST_IMAGE_RESOLVER_VERSION
+                            artist_cache_set(artist_cache, artist, failure_entry, matched_browse_id)
                             failed += 1
+                            save_checkpoint()
                             continue
                     else:
                         payload = None
                 entry = artist_cache_entry(artist, payload, artist_id=matched_browse_id)
+                entry["resolver_version"] = ARTIST_IMAGE_RESOLVER_VERSION
                 if entry.get("thumbnails"):
                     added += 1
                     logger.info('[artist-image] Resolved "%s" using browseId %s', artist, entry.get("browse_id") or "unknown")
@@ -267,17 +293,35 @@ class YTMusicService:
                     logger.info('[artist-image] No official thumbnail found for "%s"', artist)
                 artist_cache_set(artist_cache, artist, entry, entry.get("artist_id") or matched_browse_id)
             except Exception:
-                artist_cache_set(artist_cache, artist, artist_cache_failure_entry(artist, artist_id, "upstream_exception"), artist_id)
+                failure_entry = artist_cache_failure_entry(artist, artist_id, "upstream_exception")
+                failure_entry["resolver_version"] = ARTIST_IMAGE_RESOLVER_VERSION
+                artist_cache_set(artist_cache, artist, failure_entry, artist_id)
                 failed += 1
                 logger.info('[artist-image] No official thumbnail found for "%s"', artist)
-        raw["artist_image_cache_v2"] = artist_cache
+            save_checkpoint()
+        save_checkpoint()
         return {"seeded": seeded, "attempted": attempted, "added": added, "failed": failed, "repaired": repaired}
 
-    def enrich_album_image_cache(self, raw: dict[str, Any], album_cache: dict[str, Any], limit: int = 48, preferred_albums: list[dict[str, Any]] | None = None) -> dict[str, int]:
+    def enrich_album_image_cache(
+        self,
+        raw: dict[str, Any],
+        album_cache: dict[str, Any],
+        limit: int = 48,
+        preferred_albums: list[dict[str, Any]] | None = None,
+        checkpoint: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict[str, int]:
         if limit <= 0:
             return {"seeded": 0, "attempted": 0, "added": 0, "failed": 0}
         album_cache = ensure_album_image_cache_schema(album_cache)
         seeded = seed_album_cache_from_library(raw, album_cache)
+
+        def save_checkpoint() -> None:
+            raw["album_image_cache_v1"] = album_cache
+            if checkpoint:
+                checkpoint(album_cache)
+
+        if seeded:
+            save_checkpoint()
         album_targets = top_album_targets(raw, preferred_albums=preferred_albums)
         preferred_keys = {
             (normalise_album_name(item.get("album")), normalise_artist_name(item.get("artist")))
@@ -347,7 +391,8 @@ class YTMusicService:
                 album_cache_set(album_cache, failure, album_id=album_id, album=album, artist=artist)
                 failed += 1
                 logger.info('[album-image] Album lookup failed for "%s" by "%s"', album, artist)
-        raw["album_image_cache_v1"] = album_cache
+            save_checkpoint()
+        save_checkpoint()
         return {"seeded": seeded, "attempted": attempted, "added": added, "failed": failed}
 
     def enrich_track_metadata_cache(
@@ -560,20 +605,39 @@ class YTMusicService:
             "remaining": max(0, len(targets) - len(selected)),
         }
 
-    def enrich_duration_cache(self, normalised: dict[str, Any], duration_cache: dict[str, Any], limit: int = 1000) -> dict[str, Any]:
+    def enrich_duration_cache(
+        self,
+        normalised: dict[str, Any],
+        duration_cache: dict[str, Any],
+        limit: int = 1000,
+        checkpoint: Callable[[dict[str, Any]], None] | None = None,
+        progress_callback: Callable[[int, int, int], None] | None = None,
+    ) -> dict[str, Any]:
         if limit <= 0:
             return {"attempted": 0, "added": 0, "failed": 0, "api_batches": 0, "fallback_attempted": 0, "remaining": 0}
         all_targets = _duration_targets(normalised, duration_cache, limit)
         if not all_targets:
             return {"attempted": 0, "added": 0, "failed": 0, "api_batches": 0, "fallback_attempted": 0, "remaining": 0}
-        # Public InnerTube calls are one-at-a-time. Keep each local job short and resumable when no official batch API key exists.
-        targets = all_targets if self.settings.youtube_data_api_key else all_targets[:100]
+        # Public InnerTube calls are one-at-a-time. Keep hosted batches short,
+        # checkpoint every result, and let the coordinator queue the next
+        # batch. This avoids losing several minutes of work on a free-tier
+        # process restart.
+        public_batch_limit = max(1, int(getattr(self.settings, "duration_public_batch_limit", 100)))
+        targets = all_targets if self.settings.youtube_data_api_key else all_targets[:public_batch_limit]
         remaining = len(all_targets) - len(targets)
 
         now = datetime.now(timezone.utc)
         added = 0
+        processed = 0
         api_batches = 0
         unresolved = list(targets)
+
+        def publish_checkpoint() -> None:
+            if checkpoint:
+                checkpoint(duration_cache)
+            if progress_callback:
+                progress_callback(processed, len(targets), added)
+
         if self.settings.youtube_data_api_key:
             unresolved = []
             for batch in _chunks(targets, 50):
@@ -614,6 +678,8 @@ class YTMusicService:
                                 identity_confidence="medium",
                             )
                             added += 1
+                            processed += 1
+                            publish_checkpoint()
                         else:
                             unresolved.append(video_id)
                 except (httpx.HTTPError, ValueError, TypeError):
@@ -650,6 +716,8 @@ class YTMusicService:
                     added += 1
                 else:
                     _set_duration_cache_retry(duration_cache, video_id, "ytmusicapi.public.get_song", now)
+                processed += 1
+                publish_checkpoint()
 
         failed = len(targets) - added
         return {

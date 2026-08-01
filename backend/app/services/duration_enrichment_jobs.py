@@ -29,25 +29,16 @@ class DurationEnrichmentCoordinator:
     def __init__(self, repo: JsonRepository, timeout_seconds: int) -> None:
         self.repo = repo
         self.timeout_seconds = timeout_seconds
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._active_scopes: set[str] = set()
         self._logger = logging.getLogger("saville.duration_enrichment")
         self.recover_interrupted_job()
 
     def recover_interrupted_job(self) -> None:
-        job = self.status()
+        job = self._load_status()
         if not job or job.get("status") not in ACTIVE_STATUSES:
             return
-        job.update(
-            {
-                "status": "failed",
-                "progress": 100,
-                "message": "The backend restarted while resolving track durations. Your listening profile is still available; retry enrichment.",
-                "errorCode": "backend_restarted",
-                "finishedAt": utc_now(),
-            }
-        )
-        self.repo.save_json(JOB_KEY, job)
+        self._mark_interrupted(job)
 
     def start(self, processor: Processor) -> dict[str, Any]:
         scope = current_session_namespace() or "local"
@@ -96,7 +87,9 @@ class DurationEnrichmentCoordinator:
                 self.start(processor)
 
     def stage(self, status: str, message: str, **fields: Any) -> dict[str, Any]:
-        job = self.status() or {"jobId": uuid.uuid4().hex, "createdAt": utc_now()}
+        # Do not run restart recovery while the worker itself advances stages.
+        # Direct processor tests also call this method without start().
+        job = self._load_status() or {"jobId": uuid.uuid4().hex, "createdAt": utc_now()}
         job.update({"status": status, "progress": STAGE_PROGRESS[status], "message": message, "errorCode": None, "updatedAt": utc_now(), **fields})
         if status in TERMINAL_STATUSES:
             job["finishedAt"] = utc_now()
@@ -106,9 +99,53 @@ class DurationEnrichmentCoordinator:
     def fail(self, message: str, error_code: str) -> dict[str, Any]:
         return self.stage("failed", message, errorCode=error_code)
 
+    def update_progress(self, progress: int, message: str, **fields: Any) -> dict[str, Any]:
+        """Checkpoint live resolving progress without changing job stage."""
+        job = self._load_status() or {"jobId": uuid.uuid4().hex, "createdAt": utc_now()}
+        job.update(
+            {
+                "status": "resolving",
+                "progress": max(STAGE_PROGRESS["resolving"], min(STAGE_PROGRESS["rebuilding"] - 1, int(progress))),
+                "message": message,
+                "errorCode": None,
+                "updatedAt": utc_now(),
+                **fields,
+            }
+        )
+        self.repo.save_json(JOB_KEY, job)
+        return job
+
     def status(self) -> dict[str, Any] | None:
+        """Return this visitor's job, recovering work lost by a process restart.
+
+        Anonymous jobs are namespaced. Module-start recovery can only see the
+        unscoped/local namespace, so recovery must also happen lazily when the
+        original visitor next polls or starts a job.
+        """
+        with self._lock:
+            value = self._load_status()
+            scope = current_session_namespace() or "local"
+            if value and value.get("status") in ACTIVE_STATUSES and scope not in self._active_scopes:
+                return self._mark_interrupted(value)
+            return value
+
+    def _load_status(self) -> dict[str, Any] | None:
         value = self.repo.load_json(JOB_KEY)
         return value if isinstance(value, dict) else None
+
+    def _mark_interrupted(self, job: dict[str, Any]) -> dict[str, Any]:
+        job.update(
+            {
+                "status": "failed",
+                "progress": 100,
+                "message": "The backend restarted while resolving track durations. Saved metadata was kept; enrichment will resume safely.",
+                "errorCode": "backend_restarted",
+                "updatedAt": utc_now(),
+                "finishedAt": utc_now(),
+            }
+        )
+        self.repo.save_json(JOB_KEY, job)
+        return job
 
     @staticmethod
     def check_timeout(deadline: float) -> None:
