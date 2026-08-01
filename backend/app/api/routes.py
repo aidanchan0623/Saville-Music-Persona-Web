@@ -1304,7 +1304,10 @@ def process_takeout_import(
         importedCount=len(parsed.entries),
     )
 
-
+    # Analytics reads cache a parsed profile for speed. Release the old large
+    # objects before constructing their replacement so a small hosted instance
+    # does not briefly hold two complete listening profiles in memory.
+    repo.evict_cached(["takeout_history", "raw", "normalised", "analysis"])
     previous_raw = repo.load_json("raw")
     if not isinstance(previous_raw, dict) or previous_raw.get("source") == "demo":
         raw: dict[str, Any] = {"source": "google_takeout", "history": [], "warnings": []}
@@ -1413,7 +1416,13 @@ def process_takeout_import(
             delete_keys=["latest_report", "recommendations"],
             delete_prefixes=["persona_report:", "persona_report_pointer:", "overview_language:"],
         )
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        coordinator.log(
+            job_id,
+            "persistence_failed",
+            errorType=type(exc).__name__,
+            errorDetail=str(exc)[:300],
+        )
         coordinator.fail(
             job_id,
             "The rebuilt profile could not be saved. Your previous profile was preserved.",

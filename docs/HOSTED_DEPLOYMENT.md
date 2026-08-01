@@ -86,7 +86,7 @@ SMP_ANONYMOUS_MAX_CONCURRENT_IMPORTS=1
 SMP_ACCESS_LOG=false
 ```
 
-The two upload limits are both set because anonymous mode deliberately applies the smaller value. `536870912` is 512 MiB, which safely admits the current 246.1 MiB Takeout. Its expanded archive is about 315 MiB and remains below Saville's separate 1 GiB archive-expansion guard. The application streams the request to disk in 1 MiB chunks and deletes it after processing, so the whole ZIP is not buffered in application memory. The host or reverse proxy must still accept the request and keep the connection open long enough to finish the upload.
+The two upload limits are both set because anonymous mode deliberately applies the smaller value. `536870912` is 512 MiB, which safely admits the current 246.1 MiB Takeout. Its expanded archive is about 315 MiB and remains below Saville's separate 1 GiB archive-expansion guard. The application copies the already-spooled multipart upload to its private processing file in 8 MiB chunks and deletes it after processing, so the whole ZIP is not buffered in application memory. Large derived JSON values are stream-compressed inside SQLite while remaining backward-compatible with existing plain-text rows. The host or reverse proxy must still accept the request and keep the connection open long enough to finish the upload.
 
 For this profile, allocate at least 2 GiB RAM and a 5 GiB persistent volume. Do not raise the archive-expansion guard merely to accept a larger compressed ZIP: inspect the archive contents first, because a large ratio can indicate an accidental export of unrelated media or a ZIP bomb.
 

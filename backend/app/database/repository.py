@@ -3,9 +3,50 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+import time
+import zlib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
+
+
+COMPRESSED_JSON_PREFIX = b"SMPZ1\0"
+COMPRESS_JSON_AFTER_BYTES = 256 * 1024
+
+
+def _serialise_json(value: Any) -> str | bytes:
+    """Encode large JSON incrementally so profiles do not create huge strings.
+
+    SQLite accepts BLOB values in a TEXT-affinity column. Existing plain-text
+    rows remain readable, while large profiles are transparently compressed.
+    """
+    encoder = json.JSONEncoder(ensure_ascii=True, default=str)
+    pending = bytearray()
+    compressed: bytearray | None = None
+    compressor: zlib.compressobj | None = None
+    for text_chunk in encoder.iterencode(value):
+        chunk = text_chunk.encode("utf-8")
+        if compressor is None and len(pending) + len(chunk) <= COMPRESS_JSON_AFTER_BYTES:
+            pending.extend(chunk)
+            continue
+        if compressor is None:
+            compressor = zlib.compressobj(level=6)
+            compressed = bytearray(COMPRESSED_JSON_PREFIX)
+            compressed.extend(compressor.compress(pending))
+            pending.clear()
+        compressed.extend(compressor.compress(chunk))
+    if compressor is None:
+        return pending.decode("utf-8")
+    compressed.extend(compressor.flush())
+    return bytes(compressed)
+
+
+def _deserialise_json(value: str | bytes | memoryview) -> Any:
+    if isinstance(value, memoryview):
+        value = value.tobytes()
+    if isinstance(value, bytes) and value.startswith(COMPRESSED_JSON_PREFIX):
+        value = zlib.decompress(value[len(COMPRESSED_JSON_PREFIX) :])
+    return json.loads(value)
 
 
 class JsonRepository:
@@ -56,7 +97,7 @@ class JsonRepository:
     def save_json(self, key: str, value: Any) -> str:
         key = self._storage_key(key)
         updated_at = datetime.now(timezone.utc).isoformat()
-        payload = json.dumps(value, ensure_ascii=True, default=str)
+        payload = _serialise_json(value)
         with self.connect() as conn:
             conn.execute(
                 """
@@ -68,7 +109,7 @@ class JsonRepository:
                 """,
                 (key, payload, updated_at),
             )
-        self._remember(key, value, updated_at)
+        self._refresh_remembered(key, value, updated_at)
         return updated_at
 
     def merge_json_dict(self, key: str, value: dict[str, Any]) -> dict[str, Any]:
@@ -84,7 +125,7 @@ class JsonRepository:
         with self.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute("SELECT value FROM json_cache WHERE key = ?", (storage_key,)).fetchone()
-            current = json.loads(row["value"]) if row else {}
+            current = _deserialise_json(row["value"]) if row else {}
             if not isinstance(current, dict):
                 current = {}
             merged = _merge_json_dicts(current, value)
@@ -96,9 +137,9 @@ class JsonRepository:
                     value = excluded.value,
                     updated_at = excluded.updated_at
                 """,
-                (storage_key, json.dumps(merged, ensure_ascii=True, default=str), updated_at),
+                (storage_key, _serialise_json(merged), updated_at),
             )
-        self._remember(storage_key, merged, updated_at)
+        self._refresh_remembered(storage_key, merged, updated_at)
         return merged
 
     def save_json_batch(
@@ -113,31 +154,36 @@ class JsonRepository:
         scoped_values = {self._storage_key(key): value for key, value in values.items()}
         scoped_delete_keys = [self._storage_key(key) for key in delete_keys or []]
         scoped_delete_prefixes = [self._storage_prefix(prefix) for prefix in delete_prefixes or []]
-        rows = [
-            (key, json.dumps(value, ensure_ascii=True, default=str), updated_at)
-            for key, value in scoped_values.items()
-        ]
-        with self.connect() as conn:
-            if scoped_delete_keys:
-                conn.executemany("DELETE FROM json_cache WHERE key = ?", [(key,) for key in scoped_delete_keys])
-            for prefix in scoped_delete_prefixes:
-                conn.execute("DELETE FROM json_cache WHERE key LIKE ?", (f"{prefix}%",))
-            conn.executemany(
-                """
-                INSERT INTO json_cache(key, value, updated_at)
-                VALUES (?, ?, ?)
-                ON CONFLICT(key) DO UPDATE SET
-                    value = excluded.value,
-                    updated_at = excluded.updated_at
-                """,
-                rows,
-            )
+        rows = [(key, _serialise_json(value), updated_at) for key, value in scoped_values.items()]
+        for attempt in range(2):
+            try:
+                with self.connect() as conn:
+                    if scoped_delete_keys:
+                        conn.executemany("DELETE FROM json_cache WHERE key = ?", [(key,) for key in scoped_delete_keys])
+                    for prefix in scoped_delete_prefixes:
+                        conn.execute("DELETE FROM json_cache WHERE key LIKE ?", (f"{prefix}%",))
+                    conn.executemany(
+                        """
+                        INSERT INTO json_cache(key, value, updated_at)
+                        VALUES (?, ?, ?)
+                        ON CONFLICT(key) DO UPDATE SET
+                            value = excluded.value,
+                            updated_at = excluded.updated_at
+                        """,
+                        rows,
+                    )
+                break
+            except sqlite3.OperationalError as exc:
+                transient = "locked" in str(exc).casefold() or "busy" in str(exc).casefold()
+                if not transient or attempt == 1:
+                    raise
+                time.sleep(0.5)
         for key in scoped_delete_keys:
             self._forget(key)
         for prefix in scoped_delete_prefixes:
             self._forget_prefix(prefix)
         for key, value in scoped_values.items():
-            self._remember(key, value, updated_at)
+            self._refresh_remembered(key, value, updated_at)
         return updated_at
 
     def load_json(self, key: str) -> Any | None:
@@ -146,7 +192,7 @@ class JsonRepository:
             row = conn.execute("SELECT value FROM json_cache WHERE key = ?", (key,)).fetchone()
         if not row:
             return None
-        return json.loads(row["value"])
+        return _deserialise_json(row["value"])
 
     def load_json_cached(self, key: str) -> Any | None:
         """Reuse parsed large payloads until their persisted version changes."""
@@ -166,7 +212,7 @@ class JsonRepository:
         if not row:
             self._forget(key)
             return None
-        value = json.loads(row["value"])
+        value = _deserialise_json(row["value"])
         self._remember(key, value, str(row["updated_at"]))
         return value
 
@@ -177,7 +223,7 @@ class JsonRepository:
                 "SELECT key, value FROM json_cache WHERE key LIKE ? ORDER BY updated_at DESC",
                 (f"{storage_prefix}%",),
             ).fetchall()
-        return {self._logical_key(str(row["key"])): json.loads(row["value"]) for row in rows}
+        return {self._logical_key(str(row["key"])): _deserialise_json(row["value"]) for row in rows}
 
     def delete_json(self, key: str) -> None:
         key = self._storage_key(key)
@@ -199,7 +245,7 @@ class JsonRepository:
         storage_key = f"{namespace}:{key}"
         with self.connect() as conn:
             row = conn.execute("SELECT value FROM json_cache WHERE key = ?", (storage_key,)).fetchone()
-        return json.loads(row["value"]) if row else None
+        return _deserialise_json(row["value"]) if row else None
 
     def delete_namespace(self, namespace: str) -> int:
         """Delete only one anonymous visitor's cache rows."""
@@ -222,7 +268,7 @@ class JsonRepository:
             key = str(row["key"])
             namespace = key.removesuffix(":session_meta")
             try:
-                payload = json.loads(row["value"])
+                payload = _deserialise_json(row["value"])
                 expires_at = datetime.fromisoformat(str(payload["expiresAt"]).replace("Z", "+00:00"))
                 if expires_at.tzinfo is None:
                     expires_at = expires_at.replace(tzinfo=timezone.utc)
@@ -252,7 +298,7 @@ class JsonRepository:
             payload: dict[str, Any] = {}
             if row:
                 try:
-                    candidate = json.loads(row["value"])
+                    candidate = _deserialise_json(row["value"])
                     payload = candidate if isinstance(candidate, dict) else {}
                 except json.JSONDecodeError:
                     payload = {}
@@ -331,7 +377,7 @@ class JsonRepository:
         expired = 0
         for row in rows:
             try:
-                payload = json.loads(row["value"])
+                payload = _deserialise_json(row["value"])
                 expires_at = datetime.fromisoformat(str(payload["expiresAt"]).replace("Z", "+00:00"))
                 if expires_at.tzinfo is None:
                     expires_at = expires_at.replace(tzinfo=timezone.utc)
@@ -373,6 +419,17 @@ class JsonRepository:
     def _remember(self, key: str, value: Any, updated_at: str) -> None:
         with self._memory_cache_lock:
             self._memory_cache[key] = (updated_at, value)
+
+    def _refresh_remembered(self, key: str, value: Any, updated_at: str) -> None:
+        """Update an active read cache without retaining every written payload."""
+        with self._memory_cache_lock:
+            if key in self._memory_cache:
+                self._memory_cache[key] = (updated_at, value)
+
+    def evict_cached(self, keys: list[str]) -> None:
+        """Release parsed payloads before a memory-intensive profile rebuild."""
+        for key in keys:
+            self._forget(self._storage_key(key))
 
     def _forget(self, key: str) -> None:
         with self._memory_cache_lock:

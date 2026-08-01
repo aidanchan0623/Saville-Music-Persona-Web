@@ -45,6 +45,34 @@ def test_cached_json_tracks_batch_writes_and_deletes(tmp_path: Path) -> None:
     assert repository.load_json_cached("normalised") == {"version": 2}
 
 
+def test_large_json_is_compressed_at_rest_and_round_trips(tmp_path: Path) -> None:
+    repository = JsonRepository(tmp_path / "compressed.db")
+    payload = {"events": [{"title": "A long listening event", "artist": "Artist"}] * 20_000}
+
+    repository.save_json_batch({"normalised": payload})
+
+    with sqlite3.connect(repository.db_path) as conn:
+        storage_type, stored_bytes = conn.execute(
+            "SELECT typeof(value), length(value) FROM json_cache WHERE key = 'normalised'"
+        ).fetchone()
+    assert storage_type == "blob"
+    assert stored_bytes < 100_000
+    assert repository.load_json("normalised") == payload
+
+
+def test_evict_cached_releases_only_the_selected_parsed_value(tmp_path: Path) -> None:
+    repository = JsonRepository(tmp_path / "evict.db")
+    repository.save_json_batch({"normalised": {"version": 1}, "analysis": {"version": 1}})
+    normalised = repository.load_json_cached("normalised")
+    analysis = repository.load_json_cached("analysis")
+
+    repository.evict_cached(["normalised"])
+
+    assert repository.load_json_cached("normalised") == normalised
+    assert repository.load_json_cached("normalised") is not normalised
+    assert repository.load_json_cached("analysis") is analysis
+
+
 def test_runtime_metrics_are_atomic_and_session_summary_is_aggregate(tmp_path: Path) -> None:
     repository = JsonRepository(tmp_path / "metrics.db")
     repository.increment_runtime_metric("reports.accepted")
