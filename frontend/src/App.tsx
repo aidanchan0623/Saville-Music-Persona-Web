@@ -442,7 +442,11 @@ export default function App() {
       void enrichGenresInBackground("youtube", true);
     } catch (error) {
       if (!(error instanceof DOMException && error.name === "AbortError")) {
-        setMessage(error instanceof Error ? error.message : "Track duration enrichment could not finish. Your existing analysis is still available.");
+        const failureMessage = error instanceof Error ? error.message : "Track duration enrichment could not finish. Your existing analysis is still available.";
+        // Duration repair is optional background work. A transient hosted
+        // gateway interruption must not leave a scary banner over analysis
+        // that has already loaded successfully and remains fully usable.
+        setMessage(/temporarily busy|stayed unavailable|saved progress will resume/i.test(failureMessage) ? null : failureMessage);
       }
     } finally {
       if (durationAbortControllerRef.current === controller) durationAbortControllerRef.current = null;
